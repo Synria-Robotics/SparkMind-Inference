@@ -597,6 +597,8 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 self.config_dict = _convert_pretrained_pi05_config(pretrained_config)
                 self.stats = _load_pretrained_pi05_stats(checkpoint_path)
 
+            self._apply_action_chunk_overrides(self.config_dict)
+
             image_features = self.config_dict.get("image_features", [])
             self.required_cameras = []
             self._camera_key_to_role = {}

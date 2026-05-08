@@ -95,6 +95,7 @@ class TimedAction:
     timestamp: float  # Absolute time when this action should be executed
     timestep: int     # Sequential step index
     action: np.ndarray
+    ensemble_count: int = 1
     
     def get_timestamp(self) -> float:
         return self.timestamp
@@ -138,6 +139,8 @@ class SmoothingConfig:
     # Chunk threshold: trigger new inference when queue_size / chunk_size <= threshold
     # This is adaptive based on latency
     chunk_size_threshold: float = 0.5
+    action_chunk_size: Optional[int] = None
+    n_action_steps: Optional[int] = None
     
     # Latency estimation
     latency_ema_alpha: float = 0.2  # EMA smoothing factor
@@ -265,6 +268,7 @@ class TimestampedActionQueue:
                         "timestep": int(timestep),
                         "timestamp": float(timed_action.timestamp),
                         "action_shape": tuple(timed_action.action.shape),
+                        "ensemble_count": int(timed_action.ensemble_count),
                     }
                 )
             return entries
@@ -311,13 +315,20 @@ class TimestampedActionQueue:
 
                 # Check if this timestep already exists
                 if timestep in self._queue:
-                    # Aggregate with existing action (timestep already in sorted list)
                     old_action = self._queue[timestep].get_action()
-                    aggregated = self._aggregate_fn(old_action, new_action.get_action())
+                    if self.config.enable_temporal_ensemble:
+                        aggregated, ensemble_count = self._aggregate_temporal_ensemble(
+                            self._queue[timestep],
+                            new_action,
+                        )
+                    else:
+                        aggregated = self._aggregate_fn(old_action, new_action.get_action())
+                        ensemble_count = 1
                     self._queue[timestep] = TimedAction(
                         timestamp=new_action.get_timestamp(),
                         timestep=timestep,
-                        action=aggregated
+                        action=aggregated,
+                        ensemble_count=ensemble_count,
                     )
                 else:
                     # Add new action directly and maintain sorted timesteps
@@ -326,6 +337,33 @@ class TimestampedActionQueue:
 
             logger.debug(f"Queue updated: {len(self._queue)} actions, "
                         f"latest_executed={self._latest_executed_timestep}")
+
+    def _aggregate_temporal_ensemble(
+        self,
+        old_action: TimedAction,
+        new_action: TimedAction,
+    ) -> Tuple[np.ndarray, int]:
+        """ACT-style temporal ensemble for two predictions of the same timestep."""
+        chunk_size = max(1, int(self._chunk_size))
+        if chunk_size <= 1:
+            return new_action.get_action().astype(np.float32, copy=False), 1
+
+        # Match LeRobot ACTTemporalEnsembler: w_i = exp(-k * i), where w_0
+        # is the oldest prediction and later predictions get later weights.
+        old_count = max(1, int(old_action.ensemble_count))
+        effective_count = min(old_count, chunk_size - 1)
+        weights = np.exp(-float(self.config.temporal_ensemble_coeff) * np.arange(chunk_size, dtype=np.float32))
+        old_weight_sum = float(np.sum(weights[:effective_count]))
+        new_weight = float(weights[effective_count])
+        denom = old_weight_sum + new_weight
+        if denom <= 0.0:
+            return new_action.get_action().astype(np.float32, copy=False), min(effective_count + 1, chunk_size)
+
+        aggregated = (
+            old_action.get_action().astype(np.float32, copy=False) * old_weight_sum
+            + new_action.get_action().astype(np.float32, copy=False) * new_weight
+        ) / denom
+        return aggregated.astype(np.float32, copy=False), min(effective_count + 1, chunk_size)
     
     def get_action_for_time(self, current_time: float, t0: float) -> Optional[TimedAction]:
         """
@@ -642,6 +680,30 @@ class BaseInferenceEngine(ABC):
         self._episode_start_time: float = 0.0
         self._current_timestep: int = 0
         self._fallback_count: int = 0
+
+    def _apply_action_chunk_overrides(self, config_dict: Dict[str, Any]) -> None:
+        """Apply optional user overrides for model/action chunk scheduling."""
+        action_chunk_size = self.smoothing_config.action_chunk_size
+        n_action_steps = self.smoothing_config.n_action_steps
+
+        if action_chunk_size is not None:
+            config_dict["chunk_size"] = int(action_chunk_size)
+
+        chunk_size = int(config_dict.get("chunk_size", self.chunk_size or 1))
+        if chunk_size < 1:
+            raise ValueError("action_chunk_size/chunk_size must be >= 1")
+
+        if n_action_steps is not None:
+            n_steps = int(n_action_steps)
+            if n_steps < 1:
+                raise ValueError("n_action_steps must be >= 1")
+            if n_steps > chunk_size:
+                raise ValueError(
+                    f"n_action_steps ({n_steps}) must be <= action_chunk_size/chunk_size ({chunk_size})"
+                )
+            config_dict["n_action_steps"] = n_steps
+        elif "n_action_steps" in config_dict and int(config_dict["n_action_steps"]) > chunk_size:
+            config_dict["n_action_steps"] = chunk_size
     
     def _init_components(self):
         """Initialize all components after model is loaded."""

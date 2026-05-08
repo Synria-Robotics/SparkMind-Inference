@@ -31,7 +31,7 @@
 建议先进入仓库根目录并激活环境：
 
 ```bash
-cd /home/ubuntu/zhang/Inference-SDK
+cd /home/synria/demo/Inference-SDK
 source .venv/bin/activate
 ```
 
@@ -117,7 +117,41 @@ python examples/validate_dataset_async_inference.py \
   --device cuda:0
 ```
 
-### 2. 验证一个 PI0 模型并显式指定指令
+### 2. 验证带时间集成的 ACT 异步控制环
+
+```bash
+python examples/validate_dataset_async_inference.py \
+  --model models/ACT_pick_and_place_v2 \
+  --model-type act \
+  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --episode 0 \
+  --device cuda:0 \
+  --temporal-ensemble
+```
+
+如果要覆盖时间集成系数：
+
+```bash
+python examples/validate_dataset_async_inference.py \
+  --model models/ACT_pick_and_place_v2 \
+  --model-type act \
+  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --episode 0 \
+  --device cuda:0 \
+  --temporal-ensemble \
+  --temporal-ensemble-coeff 0.01
+```
+
+说明：
+
+- `--temporal-ensemble` 只支持 `act`。
+- `--temporal-ensemble-coeff` 不能单独使用，必须和 `--temporal-ensemble` 一起传。
+- 这是异步 runtime 路径上的队列层时间集成：同一 timestep 被多个 chunk 预测到时，队列用 ACT 指数权重融合。
+- 它需要 chunk overlap 才明显生效，通常保留默认 `n_action_steps` 或设置为大于 1；如果显式设置 `--n-action-steps 1`，异步队列里基本没有未来动作可重叠。
+- 开启后，重叠 timestep 使用时间集成权重；`--aggregate-fn` 主要影响未开启时间集成时的重叠 chunk 聚合。
+- 如果只想测试同步 step 路径，也可以用 `validate_dataset_inference.py --temporal-ensemble`。
+
+### 3. 验证一个 PI0 模型并显式指定指令
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -133,7 +167,7 @@ python examples/validate_dataset_async_inference.py \
 - `pi0`、`pi05` 和 `smolvla` 通常需要语言指令
 - 如果不传 `--instruction`，脚本会优先使用数据集样本里的 `task` 字段
 
-### 3. 验证开启 RTC 的 PI0 / PI0.5 / SmolVLA
+### 4. 验证开启 RTC 的 PI0 / PI0.5 / SmolVLA
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -153,7 +187,7 @@ python examples/validate_dataset_async_inference.py \
 - `--enable-rtc` 只支持 `smolvla`、`pi0`、`pi05`
 - `--rtc-inference-delay-steps` 是静态控制步延迟，默认 `0`
 
-### 4. 验证全部 episode
+### 5. 验证全部 episode
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -163,7 +197,7 @@ python examples/validate_dataset_async_inference.py \
   --all-episodes
 ```
 
-### 5. 只跑前 50 帧做快速调试
+### 6. 只跑前 50 帧做快速调试
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -174,7 +208,7 @@ python examples/validate_dataset_async_inference.py \
   --max-frames 50
 ```
 
-### 6. 更激进地补 action chunk
+### 7. 更激进地补 action chunk
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -191,7 +225,29 @@ python examples/validate_dataset_async_inference.py \
 - 阈值越大，runtime 越早提交新的 observation 请求下一段 chunk
 - 阈值越小，runtime 越倾向于等队列更接近耗尽时再补
 
-### 7. 切换重叠 chunk 的聚合策略
+### 8. 覆盖 action chunk 参数
+
+```bash
+python examples/validate_dataset_async_inference.py \
+  --model models/ACT_pick_and_place_v2 \
+  --model-type act \
+  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --episode 0 \
+  --n-action-steps 10 \
+  --chunk-size-threshold 0.5
+```
+
+说明：
+
+- `--action-chunk-size` 对应 checkpoint 里的 `chunk_size`，表示模型一次 forward 的动作 horizon。
+- `--n-action-steps` 对应 checkpoint 里的 `n_action_steps`，表示每次推理实际返回并进入异步动作队列的动作数。
+- `--chunk-size-threshold` 不是 action chunk 大小，而是队列 refill 阈值。判断条件是 `action_queue_size / n_action_steps <= threshold`。
+- 对已训练好的模型，通常优先只调 `--n-action-steps`。改 `--action-chunk-size` 可能导致模型结构和权重 shape 不匹配。
+- 当前 ACT checkpoint 写的是 `chunk_size=50, n_action_steps=1`；不显式传 `--n-action-steps` 时，SDK 会按真机控制兼容逻辑执行完整 50 步。显式传 `--n-action-steps 1` 时会尊重用户设置。
+
+例子：如果实际 `n_action_steps=10` 且 `--chunk-size-threshold 0.5`，队列剩余 `<= 5` 个动作时会提交新 observation 触发后台推理。
+
+### 9. 切换重叠 chunk 的聚合策略
 
 ```bash
 python examples/validate_dataset_async_inference.py \
@@ -222,7 +278,11 @@ python examples/validate_dataset_async_inference.py \
 - `--output-dir`：自定义输出目录
 - `--instruction`：显式语言指令，主要用于 `pi0` / `pi05` / `smolvla`
 - `--chunk-size-threshold`：动作队列填充比例阈值，默认 `0.5`
+- `--action-chunk-size`：覆盖 checkpoint `chunk_size`，即模型一次 forward 的动作 horizon。通常不建议随意改已训练模型的这个值。
+- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理实际返回并进入队列的动作数，必须小于等于 `action_chunk_size` / `chunk_size`
 - `--aggregate-fn`：重叠 chunk 的动作聚合策略，默认 `weighted_average`
+- `--temporal-ensemble`：开启 SDK ACT 时间集成，只支持 `act`；在异步脚本里作用于 action queue 的重叠 timestep
+- `--temporal-ensemble-coeff`：ACT 时间集成系数，默认 `0.01`，必须和 `--temporal-ensemble` 一起使用
 - `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 开启 RTC
 - `--rtc-prefix-attention-schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`
 - `--rtc-execution-horizon` / `--rtc-inference-delay-steps`：RTC 执行窗口和静态推理延迟步数
@@ -269,6 +329,8 @@ outputs/validate_dataset_inference/20260430_120000_model_dataset_async_episode_0
 - `control_fps`
 - `chunk_size_threshold`
 - `aggregate_fn`
+- `temporal_ensemble_enabled`
+- `temporal_ensemble_coeff`
 - `dataset_gripper_scale`
 - 每个 episode 的 `average_step_ms`
 
@@ -294,7 +356,7 @@ Dataset action dim (...) does not match model action dim (...)
 
 - 当前设备推理速度是否跟不上数据集 `fps`
 - `--chunk-size-threshold` 是否太小
-- 模型本身 chunk 太短，或者推理耗时太长
+- `--n-action-steps` 是否太小，或者推理耗时太长
 - 是否在 `cpu` 上跑了本来应当放在 `cuda:0` 的模型
 
 如果只是做快速调试，也可以先降低 `--max-frames` 缩小问题范围。
@@ -334,7 +396,7 @@ pip install -e ".[all,examples]"
 1. 先只跑一个 episode
 2. 再加 `--max-frames 20` 或 `--max-frames 50`
 3. 看日志里的 `source`、`queue`、`fallbacks`
-4. 再调 `--chunk-size-threshold`
+4. 再调 `--n-action-steps` 和 `--chunk-size-threshold`
 5. 最后再比较不同 `--aggregate-fn` 的误差和曲线差异
 
 这样更容易区分问题是出在模型本身，还是出在异步调度策略上。

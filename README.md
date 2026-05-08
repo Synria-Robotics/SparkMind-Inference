@@ -173,6 +173,8 @@ runtime.load_policy(
     config=AsyncInferenceConfig(
         control_fps=fps,
         chunk_size_threshold=0.5,
+        # action_chunk_size=50,  # 可选：覆盖 checkpoint 里的 chunk_size
+        # n_action_steps=10,     # 可选：每次推理实际返回/入队的动作数
         aggregate_fn_name="weighted_average",
         fallback_mode="hold",
     ),
@@ -217,12 +219,45 @@ finally:
 
 - `control_fps`：控制频率；真实机器人执行周期应与该值一致。
 - `chunk_size_threshold`：当 `action_queue_size / chunk_size <= threshold` 时提交新观测触发后续推理。
+- `action_chunk_size`：可选，覆盖 checkpoint 里的 `chunk_size`，表示模型一次 forward 的动作 horizon。
+- `n_action_steps`：可选，覆盖 checkpoint 里的 `n_action_steps`，表示每次推理实际返回并进入动作队列的动作数，必须 `<= action_chunk_size/chunk_size`。
 - `aggregate_fn_name`：新旧动作 chunk 重叠 timestep 的融合方式，支持 `latest_only`、`weighted_average`、`average`、`conservative`。
+- `enable_temporal_ensemble`：为 ACT 开启异步队列层时间集成。开启后，重叠 timestep 使用 ACT 指数权重融合；通常需要 `n_action_steps > 1` 且队列补帧有重叠才明显生效。
 - `fallback_mode`：动作队列为空时的行为；`hold` 使用当前 robot state，`repeat` 重复上一条动作。
 - `enable_gripper_clamping`：是否对夹爪动作做速度限制，真机可开启，离线曲线对比时可关闭。
 - `enable_rtc`：为 SmolVLA / PI0 / PI0.5 开启 RTC。
 - `rtc_prefix_attention_schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`。
 - `rtc_execution_horizon` / `rtc_inference_delay_steps`：RTC 执行窗口和静态推理延迟步数。
+
+## Alicia-M 真机控制
+
+`examples/alicia_m_async_runtime.py` 直接调用 `Alicia-M-SDK` 和 `AsyncInferenceRuntime`：
+
+- 从 `Alicia-M-SDK` 读取 `[6 关节 rad, gripper 0~1000]` 作为 policy state。
+- 调用 SDK async runtime 得到 action。
+- 默认按绝对关节/夹爪目标发布，`action[:6]` 是 6 个关节弧度目标；7 维 action 的 `action[6]` 是夹爪 `[0, 1000]`。
+- 异步动作队列为空时使用 `fallback_mode="hold"`，直接保持当前 robot state。
+
+如果 `Alicia-M-SDK` 没安装成包，示例会尝试加载同级目录 `../Alicia-M-SDK`；也可以显式指定：
+
+```bash
+export ALICIA_M_SDK_PATH=/path/to/Alicia-M-SDK
+```
+
+OpenCV 相机示例：
+
+```bash
+python examples/alicia_m_async_runtime.py \
+  --model-type act \
+  --checkpoint-dir models/ACT_pick_and_place_v2 \
+  --device cuda:0 \
+  --port /dev/ttyACM0 \
+  --camera head=0 \
+  --camera wrist=2 \
+  --fps 30
+```
+
+这个真机示例和 `examples/async_runtime_loop.py` 保持同一套最小推理参数，只额外需要 Alicia-M 串口和 OpenCV 相机映射。`act` 可加 `--temporal-ensemble`，`smolvla` / `pi0` / `pi05` 可加 `--enable-rtc`。
 
 ## Dataset 验证
 

@@ -401,6 +401,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
 
                 self.config_dict = _convert_pretrained_smolvla_config(pretrained_config)
                 self.stats = _load_pretrained_smolvla_stats(checkpoint_path)
+
+            self._apply_action_chunk_overrides(self.config_dict)
             
             # Parse camera requirements from image_features
             image_features = self.config_dict.get("image_features", [])

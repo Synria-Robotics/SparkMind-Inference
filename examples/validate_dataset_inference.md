@@ -189,6 +189,27 @@ python examples/validate_dataset_inference.py \
 - `--enable-rtc` 只支持 `smolvla`、`pi0`、`pi05`
 - `--rtc-inference-delay-steps` 是静态控制步延迟，默认 `0`
 
+### 2.2 覆盖 action chunk 参数
+
+```bash
+python examples/validate_dataset_inference.py \
+  --model models/ACT_pick_and_place_v2 \
+  --model-type act \
+  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --episode 0 \
+  --execution-mode step \
+  --n-action-steps 10
+```
+
+说明：
+
+- `--action-chunk-size` 对应 checkpoint 里的 `chunk_size`，表示模型一次 forward 的动作 horizon。
+- `--n-action-steps` 对应 checkpoint 里的 `n_action_steps`，表示每次推理实际返回多少步动作。
+- `raw` 模式仍然只用返回 chunk 的第一个动作做逐帧对比；`step` 模式会按队列/控制环语义逐步执行。
+- 对已训练好的模型，通常优先只调 `--n-action-steps`。改 `--action-chunk-size` 可能导致模型结构和权重 shape 不匹配。
+- 当前 ACT checkpoint 写的是 `chunk_size=50, n_action_steps=1`；不显式传 `--n-action-steps` 时，SDK 会按真机控制兼容逻辑执行完整 50 步。显式传 `--n-action-steps 1` 时会尊重用户设置。
+- 异步脚本里的 `--temporal-ensemble` 是队列层时间集成，需要 chunk overlap 才明显生效；同步 `step` 路径里的 `--temporal-ensemble` 则走 ACT 原始在线时间集成逻辑。
+
 ### 3. 验证全部 episode
 
 ```bash
@@ -222,6 +243,8 @@ python examples/validate_dataset_inference.py \
 - `--execution-mode`：`auto` / `raw` / `step`
 - `--temporal-ensemble`：开启 SDK ACT 时间集成，只支持 `act` + `step`/`auto`
 - `--temporal-ensemble-coeff`：ACT 时间集成系数，默认 `0.01`，必须和 `--temporal-ensemble` 一起使用
+- `--action-chunk-size`：覆盖 checkpoint `chunk_size`，即模型一次 forward 的动作 horizon。通常不建议随意改已训练模型的这个值。
+- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理实际返回的动作数，必须小于等于 `action_chunk_size` / `chunk_size`。
 - `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 开启 RTC
 - `--rtc-prefix-attention-schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`
 - `--rtc-execution-horizon` / `--rtc-inference-delay-steps`：RTC 执行窗口和静态推理延迟步数

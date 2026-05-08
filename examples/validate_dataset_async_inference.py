@@ -108,9 +108,32 @@ def _parse_args() -> argparse.Namespace:
         help="Action queue fill-ratio threshold for submitting new observations.",
     )
     parser.add_argument(
+        "--action-chunk-size",
+        type=int,
+        default=None,
+        help="Override checkpoint chunk_size, the model forward action horizon.",
+    )
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="Override checkpoint n_action_steps, the number of actions returned/enqueued per inference.",
+    )
+    parser.add_argument(
         "--aggregate-fn",
         default="weighted_average",
         help="Aggregation strategy for overlapping async action chunks.",
+    )
+    parser.add_argument(
+        "--temporal-ensemble",
+        action="store_true",
+        help="Enable SDK ACT temporal ensembling.",
+    )
+    parser.add_argument(
+        "--temporal-ensemble-coeff",
+        type=float,
+        default=None,
+        help="ACT temporal ensembling coefficient. Default: 0.01 when --temporal-ensemble is set.",
     )
     parser.add_argument(
         "--enable-rtc",
@@ -226,7 +249,14 @@ def _load_runtime(
         config=AsyncInferenceConfig(
             control_fps=control_fps,
             chunk_size_threshold=args.chunk_size_threshold,
+            action_chunk_size=args.action_chunk_size,
+            n_action_steps=args.n_action_steps,
             aggregate_fn_name=args.aggregate_fn,
+            enable_temporal_ensemble=args.temporal_ensemble,
+            temporal_ensemble_coeff=(
+                0.01 if args.temporal_ensemble and args.temporal_ensemble_coeff is None
+                else (args.temporal_ensemble_coeff or 0.01)
+            ),
             enable_gripper_clamping=not args.disable_gripper_clamping,
             enable_rtc=args.enable_rtc,
             rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
@@ -301,6 +331,7 @@ def _print_run_header(
     print("Execution mode: async runtime" if args.playback_mode != "offline" else "Execution mode: offline chunk validation")
     print(f"Chunk threshold: {args.chunk_size_threshold}")
     print(f"Aggregate fn: {args.aggregate_fn}")
+    print(f"Temporal ensemble: {'enabled' if args.temporal_ensemble else 'disabled'}")
     print(f"RTC: {'enabled' if args.enable_rtc else 'disabled'}")
     print(f"Playback mode: {args.playback_mode}")
     print(f"Gripper clamping: {'disabled' if args.disable_gripper_clamping else 'enabled'}")
@@ -530,6 +561,10 @@ def main() -> int:
     model_dir, model_label = _resolve_model_source(args.model)
     dataset_root, dataset_label = _resolve_dataset_source(args.dataset)
     model_type = _resolve_model_type(args.model_type, model_dir)
+    if args.temporal_ensemble and model_type != "act":
+        raise ValueError("`--temporal-ensemble` is only supported for ACT")
+    if args.temporal_ensemble_coeff is not None and not args.temporal_ensemble:
+        raise ValueError("`--temporal-ensemble-coeff` requires `--temporal-ensemble`")
     if args.enable_rtc and model_type not in {"smolvla", "pi0", "pi05"}:
         raise ValueError("`--enable-rtc` is only supported for SmolVLA, PI0 and PI0.5")
     if args.rtc_max_guidance_weight <= 0.0:
@@ -664,6 +699,11 @@ def main() -> int:
         "control_fps": float(dataset.fps),
         "chunk_size_threshold": args.chunk_size_threshold,
         "aggregate_fn": args.aggregate_fn,
+        "temporal_ensemble_enabled": args.temporal_ensemble,
+        "temporal_ensemble_coeff": (
+            0.01 if args.temporal_ensemble and args.temporal_ensemble_coeff is None
+            else args.temporal_ensemble_coeff
+        ),
         "rtc_enabled": args.enable_rtc,
         "rtc_prefix_attention_schedule": args.rtc_prefix_attention_schedule,
         "rtc_max_guidance_weight": args.rtc_max_guidance_weight,

@@ -51,6 +51,8 @@ class AsyncInferenceConfig:
 
     control_fps: float = 30.0
     chunk_size_threshold: float = 0.5
+    action_chunk_size: Optional[int] = None
+    n_action_steps: Optional[int] = None
     aggregate_fn_name: str = "weighted_average"
     obs_queue_maxsize: int = 1
     fallback_mode: str = "repeat"
@@ -90,6 +92,8 @@ class AsyncInferenceConfig:
             enable_gripper_clamping=self.enable_gripper_clamping,
             enable_async_inference=enable_async_inference,
             chunk_size_threshold=self.chunk_size_threshold,
+            action_chunk_size=self.action_chunk_size,
+            n_action_steps=self.n_action_steps,
             latency_ema_alpha=self.latency_ema_alpha,
             latency_safety_margin=self.latency_safety_margin,
             aggregate_fn_name=self.aggregate_fn_name,
@@ -112,6 +116,16 @@ class AsyncInferenceConfig:
             raise ValueError("control_fps must be > 0")
         if not 0.0 <= self.chunk_size_threshold <= 1.0:
             raise ValueError("chunk_size_threshold must be between 0.0 and 1.0")
+        if self.action_chunk_size is not None and self.action_chunk_size < 1:
+            raise ValueError("action_chunk_size must be >= 1")
+        if self.n_action_steps is not None and self.n_action_steps < 1:
+            raise ValueError("n_action_steps must be >= 1")
+        if (
+            self.action_chunk_size is not None
+            and self.n_action_steps is not None
+            and self.n_action_steps > self.action_chunk_size
+        ):
+            raise ValueError("n_action_steps must be <= action_chunk_size")
         if self.obs_queue_maxsize < 1:
             raise ValueError("obs_queue_maxsize must be >= 1")
         if self.fallback_mode not in {"repeat", "hold"}:
@@ -122,6 +136,8 @@ class AsyncInferenceConfig:
             raise ValueError("latency_safety_margin must be >= 0.0")
         if self.gripper_max_velocity < 0.0:
             raise ValueError("gripper_max_velocity must be >= 0.0")
+        if self.temporal_ensemble_coeff < 0.0:
+            raise ValueError("temporal_ensemble_coeff must be >= 0.0")
         if self.max_consecutive_errors < 1:
             raise ValueError("max_consecutive_errors must be >= 1")
         if self.trace_max_events < 1:
@@ -269,6 +285,8 @@ class AsyncInferenceRuntime:
             self._device = device
             self._strict_device = strict_device
             self._model_type = normalize_model_type(algorithm_type)
+            if self._config.enable_temporal_ensemble and self._model_type != "act":
+                raise ValueError("Temporal ensemble is only supported for ACT policies.")
             self._checkpoint_dir = str(checkpoint_dir)
             self._instruction = instruction
 
@@ -1107,6 +1125,8 @@ def _normalize_config(config: Optional[AsyncInferenceConfig | SmoothingConfig]) 
         normalized = AsyncInferenceConfig(
             control_fps=config.control_fps,
             chunk_size_threshold=config.chunk_size_threshold,
+            action_chunk_size=config.action_chunk_size,
+            n_action_steps=config.n_action_steps,
             aggregate_fn_name=config.aggregate_fn_name,
             obs_queue_maxsize=config.obs_queue_maxsize,
             fallback_mode=config.fallback_mode,

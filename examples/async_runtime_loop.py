@@ -7,10 +7,16 @@ functions. Replace them with your backend's real hardware integration.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
 from typing import Dict
 
 import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from inference_sdk import AsyncInferenceConfig, SUPPORTED_MODEL_TYPES, get_global_async_runtime
 
@@ -42,54 +48,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--instruction", default=None)
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--chunk-size-threshold", type=float, default=0.5)
-    parser.add_argument("--aggregate-fn", default="weighted_average")
-    parser.add_argument("--enable-rtc", action="store_true", help="Enable RTC for SmolVLA/PI0/PI0.5 policies.")
     parser.add_argument(
-        "--rtc-prefix-attention-schedule",
-        choices=["ZEROS", "ONES", "LINEAR", "EXP", "zeros", "ones", "linear", "exp"],
-        default="LINEAR",
-        help="RTC prefix attention schedule. Default: LINEAR.",
-    )
-    parser.add_argument("--rtc-max-guidance-weight", type=float, default=10.0)
-    parser.add_argument("--rtc-execution-horizon", type=int, default=10)
-    parser.add_argument("--rtc-inference-delay-steps", type=int, default=0)
-    parser.add_argument("--rtc-debug", action="store_true")
-    parser.add_argument("--rtc-debug-maxlen", type=int, default=100)
-    parser.add_argument(
-        "--fallback-mode",
-        choices=["hold", "repeat"],
-        default="hold",
+        "--chunk-size-threshold",
+        dest="chunk_size_threshold",
+        type=float,
+        default=0.5,
         help=(
-            "Action to use when the async queue is empty. "
-            "`hold` sends the current robot state, `repeat` repeats the last action."
+            "Queue refill threshold for async inference. "
+            "The model action chunk size is read from the checkpoint."
         ),
     )
     parser.add_argument(
-        "--startup-timeout",
-        type=float,
-        default=5.0,
-        help="Seconds to wait for the initial warmup action queue before entering the control loop.",
+        "--action-chunk-size",
+        type=int,
+        default=None,
+        help="Override checkpoint chunk_size, the model forward action horizon.",
     )
-    warmup_group = parser.add_mutually_exclusive_group()
-    warmup_group.add_argument(
-        "--warmup",
-        dest="warmup",
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="Override checkpoint n_action_steps, the number of actions returned/enqueued per inference.",
+    )
+    parser.add_argument(
+        "--temporal-ensemble",
         action="store_true",
-        default=True,
-        help="Run one synchronous prediction before starting the control loop. Enabled by default.",
+        help="Enable ACT temporal ensembling. Only valid when --model-type act.",
     )
-    warmup_group.add_argument(
-        "--no-warmup",
-        dest="warmup",
-        action="store_false",
-        help="Skip startup warmup. The first control ticks may use fallback actions.",
+    parser.add_argument(
+        "--enable-rtc",
+        action="store_true",
+        help="Enable RTC. Only valid for SmolVLA/PI0/PI0.5 policies.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.temporal_ensemble and args.model_type != "act":
+        raise ValueError("--temporal-ensemble is only supported for ACT")
     if args.enable_rtc and args.model_type not in {"smolvla", "pi0", "pi05"}:
         raise ValueError("--enable-rtc is only supported for SmolVLA, PI0 and PI0.5")
 
@@ -103,28 +100,22 @@ def main() -> None:
         config=AsyncInferenceConfig(
             control_fps=args.fps,
             chunk_size_threshold=args.chunk_size_threshold,
-            aggregate_fn_name=args.aggregate_fn,
-            fallback_mode=args.fallback_mode,
+            action_chunk_size=args.action_chunk_size,
+            n_action_steps=args.n_action_steps,
+            enable_temporal_ensemble=args.temporal_ensemble,
             enable_rtc=args.enable_rtc,
-            rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
-            rtc_max_guidance_weight=args.rtc_max_guidance_weight,
-            rtc_execution_horizon=args.rtc_execution_horizon,
-            rtc_inference_delay_steps=args.rtc_inference_delay_steps,
-            rtc_debug=args.rtc_debug,
-            rtc_debug_maxlen=args.rtc_debug_maxlen,
         ),
     )
 
-    if args.warmup:
-        runtime.warmup(
-            images=read_camera_images(),
-            state=read_robot_state(),
-            instruction=args.instruction,
-        )
+    runtime.warmup(
+        images=read_camera_images(),
+        state=read_robot_state(),
+        instruction=args.instruction,
+    )
 
     runtime.start()
 
-    if args.warmup and not runtime.wait_until_ready(min_queue_size=1, timeout=args.startup_timeout):
+    if not runtime.wait_until_ready(min_queue_size=1, timeout=5.0):
         runtime.stop()
         raise RuntimeError("Async runtime did not produce an initial action before startup timeout.")
 

@@ -217,6 +217,18 @@ def _parse_args() -> argparse.Namespace:
         help="ACT temporal ensembling coefficient. Default: 0.01 when --temporal-ensemble is set.",
     )
     parser.add_argument(
+        "--action-chunk-size",
+        type=int,
+        default=None,
+        help="Override checkpoint chunk_size, the model forward action horizon.",
+    )
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="Override checkpoint n_action_steps, the number of actions returned/enqueued per inference.",
+    )
+    parser.add_argument(
         "--enable-rtc",
         action="store_true",
         help="Enable RTC for SmolVLA/PI0/PI0.5 policies.",
@@ -593,6 +605,8 @@ def _load_engine(model_type: str, model_dir: Path, args: argparse.Namespace, con
         control_fps=control_fps,
         enable_async_inference=False,
         aggregate_fn_name="latest_only",
+        action_chunk_size=args.action_chunk_size,
+        n_action_steps=args.n_action_steps,
         enable_temporal_ensemble=args.temporal_ensemble,
         temporal_ensemble_coeff=(
             0.01 if args.temporal_ensemble and args.temporal_ensemble_coeff is None
@@ -643,6 +657,8 @@ def _load_async_runtime(
         config=AsyncInferenceConfig(
             control_fps=control_fps,
             chunk_size_threshold=0.5,
+            action_chunk_size=args.action_chunk_size,
+            n_action_steps=args.n_action_steps,
             aggregate_fn_name="weighted_average",
             enable_rtc=args.enable_rtc,
             rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,

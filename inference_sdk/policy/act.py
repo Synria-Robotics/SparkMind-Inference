@@ -155,6 +155,29 @@ def _load_pretrained_act_stats(checkpoint_path: Path) -> Dict[str, Dict[str, Any
     return stats
 
 
+def _feature_gripper_stats_are_unit_scaled(
+    stats: Optional[Dict[str, Dict[str, Any]]],
+    feature_name: str,
+) -> bool:
+    """Infer whether the last feature dimension was stored in [0, 1] scale."""
+    if not stats or feature_name not in stats:
+        return True
+
+    feature_stats = stats[feature_name]
+    last_dim_values: list[float] = []
+    for stat_name in ("mean", "std", "min", "max", "q01", "q10", "q50", "q90", "q99"):
+        if stat_name not in feature_stats:
+            continue
+        stat_array = np.asarray(feature_stats[stat_name], dtype=np.float32).reshape(-1)
+        if stat_array.size:
+            last_dim_values.append(abs(float(stat_array[-1])))
+
+    if not last_dim_values:
+        return True
+
+    return max(last_dim_values) <= 1.5
+
+
 def _load_act_state_dict(checkpoint_path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
     safetensors_path = checkpoint_path / "model.safetensors"
     if safetensors_path.is_file():
@@ -222,6 +245,8 @@ class ACTInferenceEngine(BaseInferenceEngine):
         self.config: Optional[Any] = None
         self.stats: Optional[Dict] = None
         self.loaded_n_action_steps: int = 1
+        self._state_gripper_stats_unit_scaled = True
+        self._action_gripper_stats_unit_scaled = True
         
         # Camera role mapping: image_feature -> camera_role
         # e.g., "observation.images.cam_head" -> "head"
@@ -293,6 +318,15 @@ class ACTInferenceEngine(BaseInferenceEngine):
                 config_dict = _convert_pretrained_act_config(pretrained_config)
                 self.stats = _load_pretrained_act_stats(checkpoint_path)
 
+            self._state_gripper_stats_unit_scaled = _feature_gripper_stats_are_unit_scaled(
+                self.stats,
+                "observation.state",
+            )
+            self._action_gripper_stats_unit_scaled = _feature_gripper_stats_are_unit_scaled(
+                self.stats,
+                "action",
+            )
+            self._apply_action_chunk_overrides(config_dict)
             self.config = OmegaConf.create(config_dict)
             
             # Parse camera requirements from image_features
@@ -328,7 +362,11 @@ class ACTInferenceEngine(BaseInferenceEngine):
             # chunk over multiple control steps. Exported LeRobot configs commonly set
             # n_action_steps=1 for their policy wrapper API, but using only one step here
             # makes the queue degenerate and causes frequent fallback/re-query on real robots.
-            if self.chunk_size > 1 and self.n_action_steps <= 1:
+            if (
+                self.smoothing_config.n_action_steps is None
+                and self.chunk_size > 1
+                and self.n_action_steps <= 1
+            ):
                 logger.warning(
                     "ACT checkpoint reports n_action_steps=%s with chunk_size=%s; "
                     "overriding execution to consume the full chunk for real-robot control.",
@@ -350,6 +388,11 @@ class ACTInferenceEngine(BaseInferenceEngine):
             logger.info(f"Required cameras: {self.required_cameras}")
             logger.info(f"State dim: {self.state_dim}, Action dim: {self.action_dim}")
             logger.info(f"Chunk size: {self.chunk_size}, N action steps: {self.n_action_steps}")
+            logger.info(
+                "ACT gripper stats scale: state=%s action=%s",
+                "[0,1]" if self._state_gripper_stats_unit_scaled else "robot-space",
+                "[0,1]" if self._action_gripper_stats_unit_scaled else "robot-space",
+            )
             
             self.is_loaded = True
             
@@ -430,8 +473,8 @@ class ACTInferenceEngine(BaseInferenceEngine):
         """
         state = state.copy()  # Don't modify original
         
-        # Scale gripper from [0, 1000] to [0, 1] to match training data
-        if len(state) >= 7:
+        # Exported checkpoints may store gripper stats in [0, 1] or robot-space.
+        if len(state) >= 7 and self._state_gripper_stats_unit_scaled:
             state[-1] = state[-1] / 1000.0
         
         state_tensor = torch.from_numpy(state).float()
@@ -466,9 +509,8 @@ class ACTInferenceEngine(BaseInferenceEngine):
         
         action = action.numpy()
         
-        # Scale gripper from [0, 1] to [0, 1000] for robot control
-        # The last dimension is gripper, trained with normalized values in [0, 1]
-        if len(action) >= 7:
+        # Return robot-space actions. Only scale when checkpoint stats are unit gripper values.
+        if len(action) >= 7 and self._action_gripper_stats_unit_scaled:
             action[-1] = action[-1] * 1000.0
         
         return action
