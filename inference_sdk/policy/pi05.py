@@ -27,7 +27,6 @@ import yaml
 from ..base import BaseInferenceEngine, SmoothingConfig
 from ..device import resolve_torch_device
 from ..runtime import format_optional_dependency_error, iter_model_search_roots, iter_unique_paths
-from .gripper_scale import feature_gripper_stats_are_unit_scaled
 from .rtc import make_rtc_config, make_rtc_processor
 
 logger = logging.getLogger(__name__)
@@ -199,6 +198,31 @@ def _apply_feature_normalization(
         return (tensor + 1.0) * denom / 2.0 + low if inverse else 2.0 * (tensor - low) / denom - 1.0
 
     raise ValueError(f"Unsupported PI05 normalization mode: {mode}")
+
+
+def _last_stat_value(feature_stats: Dict[str, Any], stat_name: str) -> Optional[float]:
+    if stat_name not in feature_stats:
+        return None
+
+    values = np.asarray(feature_stats[stat_name], dtype=np.float32)
+    if values.size == 0:
+        return None
+    return float(values.reshape(-1)[-1])
+
+
+def _feature_gripper_uses_robot_units(
+    stats: Optional[Dict[str, Dict[str, Any]]],
+    feature_key: str,
+) -> bool:
+    if stats is None or feature_key not in stats:
+        return False
+
+    feature_stats = stats[feature_key]
+    for stat_name in ("mean", "std", "min", "max", "q01", "q10", "q50", "q90", "q99"):
+        value = _last_stat_value(feature_stats, stat_name)
+        if value is not None and abs(value) > 1.5:
+            return True
+    return False
 
 
 def _load_pretrained_pi05_stats(checkpoint_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -522,10 +546,11 @@ class PI05InferenceEngine(BaseInferenceEngine):
         self.config: Optional[Any] = None
         self.config_dict: Optional[Dict[str, Any]] = None
         self.stats: Optional[Dict[str, Dict[str, Any]]] = None
-        self._state_gripper_stats_unit_scaled = True
-        self._action_gripper_stats_unit_scaled = True
         self.tokenizer: Optional[Any] = None
         self.tokenizer_source: Optional[str] = None
+
+        self._state_gripper_uses_robot_units: bool = False
+        self._action_gripper_uses_robot_units: bool = False
 
         self._camera_key_to_role: Dict[str, str] = {}
         self._role_to_camera_key: Dict[str, str] = {}
@@ -572,7 +597,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 "PI05 模型所需的 SparkMind / transformers",
                 PI05_IMPORT_ERROR,
                 min_python=(3, 12),
-                install_hint="如果你使用本地 SparkMind checkout，请用 Python 3.12+ 重建虚拟环境后再安装。",
+                install_hint="如果你使用本地 SparkMind checkout，请用 Python 3.12+ 重建虚拟环境后执行 `uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple`。",
             )
 
         valid, error = self.validate_checkpoint(checkpoint_dir)
@@ -599,15 +624,6 @@ class PI05InferenceEngine(BaseInferenceEngine):
 
                 self.config_dict = _convert_pretrained_pi05_config(pretrained_config)
                 self.stats = _load_pretrained_pi05_stats(checkpoint_path)
-
-            self._state_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
-                self.stats,
-                "observation.state",
-            )
-            self._action_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
-                self.stats,
-                "action",
-            )
 
             self._apply_action_chunk_overrides(self.config_dict)
 
@@ -636,6 +652,11 @@ class PI05InferenceEngine(BaseInferenceEngine):
             self.chunk_size = int(self.config_dict.get("chunk_size", 50))
             self.n_action_steps = int(self.config_dict.get("n_action_steps", self.chunk_size))
             self._max_state_dim = int(self.config_dict.get("max_state_dim", 32))
+            self._state_gripper_uses_robot_units = _feature_gripper_uses_robot_units(
+                self.stats,
+                "observation.state",
+            )
+            self._action_gripper_uses_robot_units = _feature_gripper_uses_robot_units(self.stats, "action")
 
             pi05_config_kwargs = _coerce_pi05_config_dict(self.config_dict, str(self.device))
             if self.smoothing_config.enable_rtc:
@@ -732,9 +753,9 @@ class PI05InferenceEngine(BaseInferenceEngine):
             logger.info("Chunk size: %s, N action steps: %s", self.chunk_size, self.n_action_steps)
             logger.info("Tokenizer: %s", tokenizer_source)
             logger.info(
-                "PI05 gripper stats scale: state=%s action=%s",
-                "[0,1]" if self._state_gripper_stats_unit_scaled else "robot-space",
-                "[0,1]" if self._action_gripper_stats_unit_scaled else "robot-space",
+                "PI05 gripper stats units: state=%s action=%s",
+                "robot" if self._state_gripper_uses_robot_units else "normalized",
+                "robot" if self._action_gripper_uses_robot_units else "normalized",
             )
             logger.info(
                 "PI05 weights loaded with strict=False: missing=%s unexpected=%s",
@@ -826,7 +847,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
     def _preprocess_state_for_prompt(self, state: np.ndarray) -> torch.Tensor:
         state = state.copy()
 
-        if len(state) >= 7 and self._state_gripper_stats_unit_scaled:
+        if len(state) >= 7 and not self._state_gripper_uses_robot_units:
             state[-1] = state[-1] / 1000.0
 
         state_tensor = torch.from_numpy(state).float()
@@ -863,7 +884,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
 
         action = action.numpy()
 
-        if len(action) >= 7 and self._action_gripper_stats_unit_scaled:
+        if len(action) >= 7 and not self._action_gripper_uses_robot_units:
             action[-1] = action[-1] * 1000.0
 
         return action

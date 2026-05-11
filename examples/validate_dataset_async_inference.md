@@ -38,16 +38,20 @@ source .venv/bin/activate
 如果还没装完整依赖，至少需要：
 
 ```bash
-pip install -e ".[all,examples]"
+uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果你依赖本地 `SparkMind` checkout，也可以额外安装：
+如果你依赖本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind`：
 
 ```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-pip install -e ../SparkMind
+mkdir -p third_party
+git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
+uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+如果已经进入 `third_party/SparkMind` 目录，也可以执行 `uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple`。
 
 注意：
 
@@ -384,10 +388,10 @@ Dataset action dim (...) does not match model action dim (...)
 如果缺少 `huggingface_hub`、`matplotlib`、`lerobot` 或 `SparkMind`，优先执行：
 
 ```bash
-pip install -e ".[all,examples]"
+uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果你需要本地 SparkMind 兼容路径，再单独处理 Python 3.12 环境。
+如果你需要本地 SparkMind 兼容路径，请按前提条件中的 `third_party/SparkMind` 步骤处理 Python 3.12 环境。
 
 ## 建议的使用顺序
 

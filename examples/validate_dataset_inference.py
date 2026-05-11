@@ -47,12 +47,17 @@ HF_DATASETS_CACHE, HF_HUB_CACHE = _ensure_cache_dirs(REPO_ROOT)
 
 
 def _ensure_sparkmind_path(repo_root: Path) -> Path:
-    sparkmind_root = repo_root / "SparkMind"
-    if sparkmind_root.is_dir():
-        sparkmind_root_str = str(sparkmind_root)
-        if sparkmind_root_str not in sys.path:
-            sys.path.insert(0, sparkmind_root_str)
-    return sparkmind_root
+    candidates = (
+        repo_root / "third_party" / "SparkMind",
+        repo_root / "SparkMind",
+    )
+    for sparkmind_root in candidates:
+        if sparkmind_root.is_dir():
+            sparkmind_root_str = str(sparkmind_root)
+            if sparkmind_root_str not in sys.path:
+                sys.path.insert(0, sparkmind_root_str)
+            return sparkmind_root
+    return candidates[0]
 
 
 SPARKMIND_ROOT = _ensure_sparkmind_path(REPO_ROOT)
@@ -74,7 +79,7 @@ def _load_snapshot_download():
         raise RuntimeError(
             "Missing dependency: huggingface_hub\n"
             "Install example dependencies first, for example:\n"
-            "  pip install -e '.[all,examples]'"
+            "  uv pip install -e '.[all,examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple"
         ) from exc
     return snapshot_download
 
@@ -89,9 +94,9 @@ def _load_dataset_class():
             raise RuntimeError(
                 "Missing dependency: LeRobotDataset\n"
                 "Install SparkMind or lerobot first, for example:\n"
-                "  pip install -e '.[all,examples]'\n"
+                "  uv pip install -e '.[all,examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
                 "or:\n"
-                "  pip install -e ./SparkMind"
+                "  uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple"
             ) from exc
     return LeRobotDataset
 
@@ -106,7 +111,7 @@ def _load_pyplot():
         raise RuntimeError(
             "Missing dependency: matplotlib\n"
             "Install example dependencies first, for example:\n"
-            "  pip install -e '.[examples]'"
+            "  uv pip install -e '.[examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple"
         ) from exc
     return plt
 

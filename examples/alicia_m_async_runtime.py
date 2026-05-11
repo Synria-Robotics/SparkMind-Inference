@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run async policy inference directly with Alicia-M-SDK.
+"""Run policy inference directly with Alicia-M-SDK.
 
-The inference SDK owns policy loading and async action scheduling. This example
-keeps Alicia-M hardware I/O in the script: connect the robot, read state, call
-the runtime, and publish the selected action.
+The inference SDK owns policy loading and action selection. This example keeps
+Alicia-M hardware I/O in the script: connect the robot, read state, call the
+runtime, and publish the selected action. It defaults to async inference and can
+switch ACT to synchronous inference with --inference-mode sync.
 
 Example:
     python examples/alicia_m_async_runtime.py \
@@ -34,7 +35,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from inference_sdk import AsyncInferenceConfig, SUPPORTED_MODEL_TYPES, get_global_async_runtime  # noqa: E402
+from inference_sdk import (  # noqa: E402
+    AsyncInferenceConfig,
+    InferenceSDK,
+    SUPPORTED_MODEL_TYPES,
+    SmoothingConfig,
+    get_global_async_runtime,
+)
 
 
 class OpenCVCameraReader:
@@ -136,6 +143,14 @@ def read_robot_state(robot: Any) -> np.ndarray:
     return result
 
 
+def robot_state_to_policy_state(state: np.ndarray) -> np.ndarray:
+    policy_state = np.asarray(state, dtype=np.float32).reshape(-1).copy()
+    if policy_state.shape[0] < 6:
+        raise ValueError(f"Alicia-M state must contain at least 6 joints, got {policy_state.shape[0]}.")
+    policy_state[:6] = np.degrees(policy_state[:6])
+    return policy_state
+
+
 def wait_for_robot_state(robot: Any, timeout: float = 2.0) -> np.ndarray:
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
@@ -165,7 +180,7 @@ def publish_robot_action(robot: Any, action: np.ndarray, current_state: np.ndarr
         robot.set_robot_state(
             target_joints=joints.tolist(),
             gripper_value=gripper,
-            joint_format="rad",
+            joint_format="deg",
             wait_for_completion=False,
             use_interpolation=False,
         )
@@ -174,16 +189,28 @@ def publish_robot_action(robot: Any, action: np.ndarray, current_state: np.ndarr
 
 def hold_current(robot: Any) -> None:
     state = read_robot_state(robot)
-    publish_robot_action(robot, state, state)
+    robot.set_robot_state(
+        target_joints=state[:6].tolist(),
+        gripper_value=float(state[6]),
+        joint_format="rad",
+        wait_for_completion=False,
+        use_interpolation=False,
+    )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Async policy inference loop for Alicia-M real robot.")
+    parser = argparse.ArgumentParser(description="Policy inference loop for Alicia-M real robot.")
     parser.add_argument("--model-type", required=True, choices=SUPPORTED_MODEL_TYPES)
     parser.add_argument("--checkpoint-dir", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--instruction", default=None)
     parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument(
+        "--inference-mode",
+        choices=("async", "sync"),
+        default="async",
+        help="Use async runtime or synchronous engine.step(). Use sync for ACT if async queue jitter is visible.",
+    )
     parser.add_argument(
         "--chunk-size-threshold",
         dest="chunk_size_threshold",
@@ -211,6 +238,16 @@ def parse_args() -> argparse.Namespace:
         metavar="ROLE=SOURCE",
         help="Camera role and OpenCV source, for example head=0 or wrist=/dev/video2.",
     )
+    parser.add_argument(
+        "--debug-actions",
+        action="store_true",
+        help="Print current policy state, target action and delta once per status interval.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run inference and status logging without publishing actions to the robot.",
+    )
     return parser.parse_args()
 
 
@@ -232,45 +269,83 @@ def state_dim_for_runtime(metadata: Any) -> int:
     return min(7, int(metadata.state_dim) if metadata.state_dim else 7)
 
 
+def format_array(values: np.ndarray, precision: int = 2) -> str:
+    return "[" + ",".join(f"{float(value):.{precision}f}" for value in values) + "]"
+
+
 def main() -> None:
     args = parse_args()
     if args.temporal_ensemble and args.model_type != "act":
         raise ValueError("--temporal-ensemble is only supported for ACT")
     if args.enable_rtc and args.model_type not in {"smolvla", "pi0", "pi05"}:
         raise ValueError("--enable-rtc is only supported for SmolVLA, PI0 and PI0.5")
-
     robot: Any | None = None
     camera_reader: OpenCVCameraReader | None = None
-    runtime = get_global_async_runtime()
+    runtime = get_global_async_runtime() if args.inference_mode == "async" else None
+    sdk: InferenceSDK | None = None
     last_status_time = 0.0
+    sync_tick = 0
     action_dim_for_fallback = 7
 
     def safe_hold_action(_state: np.ndarray | None) -> np.ndarray:
-        if robot is None or not robot.is_connected():
-            return np.zeros(action_dim_for_fallback, dtype=np.float32)
-        return read_robot_state(robot)[:action_dim_for_fallback].astype(np.float32, copy=True)
+        if _state is not None:
+            policy_state = np.asarray(_state, dtype=np.float32).reshape(-1)
+            if policy_state.shape[0] >= action_dim_for_fallback:
+                return policy_state[:action_dim_for_fallback].copy()
+            if action_dim_for_fallback == 7 and policy_state.shape[0] == 6:
+                held_action = np.zeros(7, dtype=np.float32)
+                held_action[:6] = policy_state[:6]
+                if robot is not None and robot.is_connected():
+                    held_action[6] = float(read_robot_state(robot)[6])
+                return held_action
+        if robot is not None and robot.is_connected():
+            return robot_state_to_policy_state(read_robot_state(robot))[:action_dim_for_fallback].astype(
+                np.float32,
+                copy=True,
+            )
+        return np.zeros(action_dim_for_fallback, dtype=np.float32)
 
     try:
         alicia_m_sdk = load_alicia_m_sdk()
         robot = create_robot(alicia_m_sdk, args.port)
         camera_reader = OpenCVCameraReader(parse_cameras(args.camera))
 
-        metadata = runtime.load_policy(
-            algorithm_type=args.model_type,
-            checkpoint_dir=args.checkpoint_dir,
-            device=args.device,
-            instruction=args.instruction,
-            config=AsyncInferenceConfig(
-                control_fps=args.fps,
-                chunk_size_threshold=args.chunk_size_threshold,
-                action_chunk_size=args.action_chunk_size,
-                n_action_steps=args.n_action_steps,
-                fallback_mode="hold",
-                safe_action_fn=safe_hold_action,
-                enable_temporal_ensemble=args.temporal_ensemble,
-                enable_rtc=args.enable_rtc,
-            ),
-        )
+        if args.inference_mode == "async":
+            if runtime is None:
+                raise RuntimeError("Async runtime is not initialized.")
+            metadata = runtime.load_policy(
+                algorithm_type=args.model_type,
+                checkpoint_dir=args.checkpoint_dir,
+                device=args.device,
+                instruction=args.instruction,
+                config=AsyncInferenceConfig(
+                    control_fps=args.fps,
+                    chunk_size_threshold=args.chunk_size_threshold,
+                    action_chunk_size=args.action_chunk_size,
+                    n_action_steps=args.n_action_steps,
+                    fallback_mode="hold",
+                    safe_action_fn=safe_hold_action,
+                    enable_temporal_ensemble=args.temporal_ensemble,
+                    enable_rtc=args.enable_rtc,
+                ),
+            )
+        else:
+            sdk = InferenceSDK(
+                device=args.device,
+                smoothing_config=SmoothingConfig(
+                    control_fps=args.fps,
+                    action_chunk_size=args.action_chunk_size,
+                    n_action_steps=args.n_action_steps,
+                    fallback_mode="hold",
+                    enable_temporal_ensemble=args.temporal_ensemble,
+                    enable_rtc=args.enable_rtc,
+                ),
+            )
+            metadata = sdk.load_policy(
+                args.model_type,
+                args.checkpoint_dir,
+                instruction=args.instruction,
+            )
         if metadata.action_dim not in (6, 7):
             raise ValueError(f"Alicia-M publisher supports action_dim 6 or 7, got {metadata.action_dim}.")
         if metadata.state_dim and metadata.state_dim not in (6, 7):
@@ -278,8 +353,9 @@ def main() -> None:
         action_dim_for_fallback = int(metadata.action_dim)
 
         print(
-            "loaded model=%s action_dim=%d state_dim=%d cameras=%s"
+            "loaded mode=%s model=%s action_dim=%d state_dim=%d cameras=%s"
             % (
+                args.inference_mode,
                 metadata.model_type,
                 metadata.action_dim,
                 metadata.state_dim,
@@ -288,51 +364,108 @@ def main() -> None:
             flush=True,
         )
 
-        initial_state = wait_for_robot_state(robot, timeout=2.0)
-        runtime.warmup(
-            images=camera_reader.read(),
-            state=initial_state[: state_dim_for_runtime(metadata)],
-            instruction=args.instruction,
-        )
-        runtime.start()
-        if not runtime.wait_until_ready(min_queue_size=1, timeout=5.0):
-            runtime.stop()
-            raise RuntimeError("Async runtime did not produce an initial action before startup timeout.")
+        initial_state = robot_state_to_policy_state(wait_for_robot_state(robot, timeout=2.0))
+        if args.inference_mode == "async":
+            if runtime is None:
+                raise RuntimeError("Async runtime is not initialized.")
+            runtime.warmup(
+                images=camera_reader.read(),
+                state=initial_state[: state_dim_for_runtime(metadata)],
+                instruction=args.instruction,
+            )
+            runtime.start()
+            if not runtime.wait_until_ready(min_queue_size=1, timeout=5.0):
+                runtime.stop()
+                raise RuntimeError("Async runtime did not produce an initial action before startup timeout.")
 
         while True:
             tick_start = time.monotonic()
             current_state = read_robot_state(robot)
-            result = runtime.step(
-                images=camera_reader.read(),
-                state=current_state[: state_dim_for_runtime(metadata)],
-                instruction=args.instruction,
-            )
-            publish_robot_action(robot, result.action, current_state)
+            current_policy_state = robot_state_to_policy_state(current_state)
+            if args.inference_mode == "async":
+                if runtime is None:
+                    raise RuntimeError("Async runtime is not initialized.")
+                result = runtime.step(
+                    images=camera_reader.read(),
+                    state=current_policy_state[: state_dim_for_runtime(metadata)],
+                    instruction=args.instruction,
+                )
+                status = runtime.get_status()
+                raw_action = np.asarray(result.action, dtype=np.float32).reshape(-1)
+                tick_id = result.timestep
+                action_source = result.source
+                queue_size = result.queue_size
+                latency_ms = status.latency_estimate * 1000.0
+                fallback_count = status.fallback_count
+                error_count = status.error_count
+            else:
+                if sdk is None:
+                    raise RuntimeError("Synchronous SDK is not initialized.")
+                sync_tick += 1
+                infer_start = time.perf_counter()
+                raw_action = np.asarray(
+                    sdk.predict_action(
+                        args.model_type,
+                        images=camera_reader.read(),
+                        state=current_policy_state[: state_dim_for_runtime(metadata)],
+                        instruction=args.instruction,
+                    ),
+                    dtype=np.float32,
+                ).reshape(-1)
+                latency_ms = (time.perf_counter() - infer_start) * 1000.0
+                tick_id = sync_tick
+                action_source = "sync"
+                queue_size = 0
+                fallback_count = 0
+                error_count = 0
+            published = False
+            if not args.dry_run:
+                published = publish_robot_action(robot, raw_action, current_state)
 
             now = time.monotonic()
             if now - last_status_time >= 1.0:
                 last_status_time = now
-                status = runtime.get_status()
                 print(
-                    "tick=%d source=%s queue=%d latency=%.1fms fallbacks=%d errors=%d"
+                    "tick=%d mode=%s source=%s queue=%d latency=%.1fms fallbacks=%d errors=%d publish=%s"
                     % (
-                        result.timestep,
-                        result.source,
-                        result.queue_size,
-                        status.latency_estimate * 1000.0,
-                        status.fallback_count,
-                        status.error_count,
+                        tick_id,
+                        args.inference_mode,
+                        action_source,
+                        queue_size,
+                        latency_ms,
+                        fallback_count,
+                        error_count,
+                        "dry-run" if args.dry_run else published,
                     ),
                     flush=True,
                 )
+                if args.debug_actions:
+                    action_array = raw_action
+                    joint_dim = min(6, action_array.shape[0], current_policy_state.shape[0])
+                    joint_delta = action_array[:joint_dim] - current_policy_state[:joint_dim]
+                    gripper_target = float(action_array[6]) if action_array.shape[0] >= 7 else float("nan")
+                    print(
+                        "  current_deg=%s action_deg=%s delta_deg=%s gripper=%.1f->%.1f"
+                        % (
+                            format_array(current_policy_state[:joint_dim]),
+                            format_array(action_array[:joint_dim]),
+                            format_array(joint_delta),
+                            float(current_policy_state[6]) if current_policy_state.shape[0] >= 7 else float("nan"),
+                            gripper_target,
+                        ),
+                        flush=True,
+                    )
 
             elapsed = time.monotonic() - tick_start
             time.sleep(max(0.0, 1.0 / args.fps - elapsed))
     except KeyboardInterrupt:
         print("Interrupted by user.", flush=True)
     finally:
-        runtime.stop()
-        runtime.close()
+        if runtime is not None:
+            runtime.stop()
+            runtime.close()
+        if sdk is not None:
+            sdk.close()
         try:
             if robot is not None and robot.is_connected():
                 hold_current(robot)

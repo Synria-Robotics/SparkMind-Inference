@@ -57,7 +57,7 @@ from .base import (  # noqa: E402
     TraceRecorder,
     get_aggregate_function,
 )
-from .api import InferenceSDK, Observation, PolicyMetadata, predict_action_chunk  # noqa: E402
+from .api import InferenceSDK, Observation, PolicyMetadata, predict_action, predict_action_chunk  # noqa: E402
 from .async_runtime import (  # noqa: E402
     AsyncInferenceConfig,
     AsyncInferenceRuntime,
@@ -136,6 +136,7 @@ __all__ = [
     "get_global_async_runtime",
     "load_async_policy",
     "normalize_model_type",
+    "predict_action",
     "predict_action_chunk",
     "start_async_runtime",
     "stop_async_runtime",

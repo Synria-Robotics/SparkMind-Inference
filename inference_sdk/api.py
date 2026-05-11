@@ -1,4 +1,4 @@
-"""High-level public SDK API for action chunk inference."""
+"""High-level public SDK API for synchronous action and action chunk inference."""
 
 from __future__ import annotations
 
@@ -43,11 +43,12 @@ class PolicyMetadata:
 
 class InferenceSDK:
     """
-    High-level SDK facade for loading policies and predicting action chunks.
+    High-level SDK facade for loading policies and synchronous inference.
 
     Typical use:
         sdk.load_policy("pi0", "/path/to/checkpoint", instruction="Pick up the object.")
         action_chunk = sdk.predict_action_chunk("pi0", images=images, state=state)
+        action = sdk.predict_action("pi0", images=images, state=state)
     """
 
     def __init__(
@@ -136,21 +137,43 @@ class InferenceSDK:
         Returns:
             Numpy array with shape (n_action_steps, action_dim).
         """
-        model_type = normalize_model_type(algorithm_type)
-        policy = self._get_policy(model_type)
-        obs = _coerce_observation(
+        policy, normalized_images, state_array = self._prepare_policy_inputs(
+            algorithm_type,
             observation=observation,
             images=images,
             state=state,
             instruction=instruction,
         )
-        self._apply_instruction(policy, obs.instruction)
-
-        normalized_images = _normalize_camera_aliases(policy, _coerce_images(obs.images))
-        state_array = _coerce_state(obs.state)
-        _validate_observation(policy, normalized_images, state_array)
-
         return policy.predict_chunk(normalized_images, state_array)
+
+    def predict_action(
+        self,
+        algorithm_type: str,
+        observation: Observation | Mapping[str, Any] | None = None,
+        *,
+        images: Optional[Mapping[str, np.ndarray]] = None,
+        state: Optional[np.ndarray] = None,
+        instruction: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        Run one synchronous control-loop step for the selected loaded policy.
+
+        Unlike AsyncInferenceRuntime, this executes on the caller thread and
+        returns exactly one action for the current observation. For ACT, pass a
+        SmoothingConfig with enable_temporal_ensemble=True to use the online
+        synchronous temporal ensemble path.
+
+        Returns:
+            Numpy array with shape (action_dim,).
+        """
+        policy, normalized_images, state_array = self._prepare_policy_inputs(
+            algorithm_type,
+            observation=observation,
+            images=images,
+            state=state,
+            instruction=instruction,
+        )
+        return policy.step(normalized_images, state_array)
 
     def get_policy_metadata(self, algorithm_type: str) -> PolicyMetadata:
         """Return metadata for a loaded policy."""
@@ -184,6 +207,30 @@ class InferenceSDK:
             raise RuntimeError(
                 f"{model_type} policy is not loaded. Call load_policy() first."
             ) from exc
+
+    def _prepare_policy_inputs(
+        self,
+        algorithm_type: str,
+        observation: Observation | Mapping[str, Any] | None = None,
+        *,
+        images: Optional[Mapping[str, np.ndarray]] = None,
+        state: Optional[np.ndarray] = None,
+        instruction: Optional[str] = None,
+    ) -> tuple[BaseInferenceEngine, Dict[str, np.ndarray], np.ndarray]:
+        model_type = normalize_model_type(algorithm_type)
+        policy = self._get_policy(model_type)
+        obs = _coerce_observation(
+            observation=observation,
+            images=images,
+            state=state,
+            instruction=instruction,
+        )
+        self._apply_instruction(policy, obs.instruction)
+
+        normalized_images = _normalize_camera_aliases(policy, _coerce_images(obs.images))
+        state_array = _coerce_state(obs.state)
+        _validate_observation(policy, normalized_images, state_array)
+        return policy, normalized_images, state_array
 
     def _new_smoothing_config(self) -> Optional[SmoothingConfig]:
         if self.smoothing_config is None:
@@ -239,7 +286,7 @@ def predict_action_chunk(
     strict_device: bool = False,
 ) -> np.ndarray:
     """
-    Convenience one-shot API: load one policy, run one inference, unload it.
+    Convenience one-shot API: load one policy, run one chunk inference, unload it.
 
     For repeated inference, prefer InferenceSDK so model weights stay loaded.
     """
@@ -250,6 +297,38 @@ def predict_action_chunk(
     ) as sdk:
         sdk.load_policy(algorithm_type, checkpoint_dir, instruction=instruction)
         return sdk.predict_action_chunk(
+            algorithm_type,
+            observation=observation,
+            images=images,
+            state=state,
+            instruction=instruction,
+        )
+
+
+def predict_action(
+    algorithm_type: str,
+    checkpoint_dir: str,
+    observation: Observation | Mapping[str, Any] | None = None,
+    *,
+    images: Optional[Mapping[str, np.ndarray]] = None,
+    state: Optional[np.ndarray] = None,
+    instruction: Optional[str] = None,
+    device: str = "cuda:0",
+    smoothing_config: Optional[SmoothingConfig] = None,
+    strict_device: bool = False,
+) -> np.ndarray:
+    """
+    Convenience one-shot API: load one policy, run one synchronous step, unload it.
+
+    For real-time loops, prefer InferenceSDK so model weights stay loaded.
+    """
+    with InferenceSDK(
+        device=device,
+        smoothing_config=smoothing_config,
+        strict_device=strict_device,
+    ) as sdk:
+        sdk.load_policy(algorithm_type, checkpoint_dir, instruction=instruction)
+        return sdk.predict_action(
             algorithm_type,
             observation=observation,
             images=images,
@@ -364,5 +443,6 @@ __all__ = [
     "InferenceSDK",
     "Observation",
     "PolicyMetadata",
+    "predict_action",
     "predict_action_chunk",
 ]

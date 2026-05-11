@@ -15,23 +15,32 @@
 ```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-uv pip install -e .
-uv pip install -e ../SparkMind
+uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+如果需要使用本地 `SparkMind`，推荐放在仓库内的 `third_party/SparkMind`：
+
+```bash
+mkdir -p third_party
+git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
+uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+上面的最后一行等价于进入 `third_party/SparkMind` 后执行 `uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple`。如果 checkout 在其他位置，请设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。
 
 可选依赖：
 
 ```bash
-uv pip install -e .[act]
-uv pip install -e .[examples]
-uv pip install -e .[vla]
-uv pip install -e .[all]
+uv pip install -e ".[act]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[vla]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[all]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 如果需要运行 dataset 验证和绘图示例，推荐直接安装：
 
 ```bash
-uv pip install -e ".[all,examples]"
+uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 ## 数据约定
@@ -39,8 +48,7 @@ uv pip install -e ".[all,examples]"
 - `images` 使用相机角色名作为 key，例如 `head`、`wrist`；可用角色以 `metadata.required_cameras` 为准。
 - 每张图像应是 BGR 格式的 `numpy.ndarray`，形状为 `(H, W, 3)`。
 - `state` 应是一维 `numpy.ndarray`，维度需要和模型 `observation.state` 一致。
-- 当前 ACT、SmolVLA、PI0、PI0.5 engine 对 SDK 调用方仍按 robot-space 处理夹爪，输入/输出最后一维夹爪通常是 `[0, 1000]`。
-- 加载 checkpoint 后，engine 会根据 `observation.state` / `action` 的最后一维 stats 自动判断模型内部夹爪是 `[0, 1]` 还是 robot-space，并只在需要时做 `/1000` 或 `*1000` 转换。
+- 当前 ACT、SmolVLA、PI0、PI0.5 engine 默认按 robot-space 处理夹爪，输入/输出最后一维夹爪通常是 `[0, 1000]`。
 - LeRobot dataset 里的夹爪如果是归一化 `[0, 1]`，验证脚本会通过 `--dataset-gripper-scale auto` 自动适配。
 
 ## 同步推理
@@ -69,14 +77,45 @@ with InferenceSDK(device="cuda:0") as sdk:
     print(action_chunk.shape)  # (metadata.n_action_steps, metadata.action_dim)
 ```
 
+如果真机控制时不想走异步队列，可以使用同步单步 `predict_action()`。这会在调用线程内执行 `engine.step()` 并直接返回当前 tick 的一个 action；ACT 可配合同步时间集成减少异步队列带来的抖动：
+
+```python
+from inference_sdk import InferenceSDK, Observation, SmoothingConfig
+
+with InferenceSDK(
+    device="cuda:0",
+    smoothing_config=SmoothingConfig(
+        control_fps=30.0,
+        enable_temporal_ensemble=True,
+        temporal_ensemble_coeff=0.01,
+    ),
+) as sdk:
+    metadata = sdk.load_policy(
+        algorithm_type="act",
+        checkpoint_dir="/path/to/checkpoint",
+    )
+
+    while True:
+        observation = Observation(images=read_camera_images(), state=read_robot_state())
+        action = sdk.predict_action("act", observation)
+        send_robot_action(action)
+```
+
 PI0.5 可使用 `algorithm_type="pi05"`，`"pi0.5"` / `"pi0_5"` / `"pi0-5"` 也会自动归一到 `pi05`。
 
 如果只需要执行一次推理，也可以使用一次性 API：
 
 ```python
-from inference_sdk import predict_action_chunk
+from inference_sdk import predict_action, predict_action_chunk
 
 action_chunk = predict_action_chunk(
+    algorithm_type="act",
+    checkpoint_dir="/path/to/checkpoint",
+    images=images,
+    state=robot_state,
+)
+
+action = predict_action(
     algorithm_type="act",
     checkpoint_dir="/path/to/checkpoint",
     images=images,
@@ -232,12 +271,12 @@ finally:
 
 ## Alicia-M 真机控制
 
-`examples/alicia_m_async_runtime.py` 直接调用 `Alicia-M-SDK` 和 `AsyncInferenceRuntime`：
+`examples/alicia_m_async_runtime.py` 直接调用 `Alicia-M-SDK`，默认使用 `AsyncInferenceRuntime`，也可以通过 `--inference-mode sync` 切到同步 `InferenceSDK.predict_action()`：
 
-- 从 `Alicia-M-SDK` 读取 `[6 关节 rad, gripper 0~1000]` 作为 policy state。
-- 调用 SDK async runtime 得到 action。
-- 默认按绝对关节/夹爪目标发布，`action[:6]` 是 6 个关节弧度目标；7 维 action 的 `action[6]` 是夹爪 `[0, 1000]`。
-- 异步动作队列为空时使用 `fallback_mode="hold"`，直接保持当前 robot state。
+- 从 `Alicia-M-SDK` 读取 `[6 关节 rad, gripper 0~1000]`，送入 policy 前把 6 个关节转换成 degree。
+- 默认调用 SDK async runtime 得到 action；如果 ACT 异步队列抖动明显，可以传 `--inference-mode sync` 让每个控制 tick 在当前线程同步选动作。
+- 默认按绝对关节/夹爪目标发布，`action[:6]` 是 6 个关节 degree 目标，脚本用 `joint_format="deg"` 交给 `Alicia-M-SDK`；7 维 action 的 `action[6]` 是夹爪 `[0, 1000]`。
+- 异步动作队列为空时使用 `fallback_mode="hold"`，用当前 robot state 转换后的 policy-space action 保持姿态；同步模式没有后台队列和 fallback 计数。
 
 如果 `Alicia-M-SDK` 没安装成包，示例会尝试加载同级目录 `../Alicia-M-SDK`；也可以显式指定：
 
@@ -256,6 +295,21 @@ python examples/alicia_m_async_runtime.py \
   --camera head=0 \
   --camera wrist=2 \
   --fps 30
+```
+
+如果 ACT 异步推理抖动较明显，优先试同步模式：
+
+```bash
+python examples/alicia_m_async_runtime.py \
+  --model-type act \
+  --checkpoint-dir models/ACT_pick_and_place_v2 \
+  --device cuda:0 \
+  --port /dev/ttyACM0 \
+  --camera head=0 \
+  --camera wrist=2 \
+  --fps 30 \
+  --inference-mode sync \
+  --temporal-ensemble
 ```
 
 这个真机示例和 `examples/async_runtime_loop.py` 保持同一套最小推理参数，只额外需要 Alicia-M 串口和 OpenCV 相机映射。`act` 可加 `--temporal-ensemble`，`smolvla` / `pi0` / `pi05` 可加 `--enable-rtc`。

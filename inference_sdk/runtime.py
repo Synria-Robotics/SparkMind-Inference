@@ -13,6 +13,10 @@ SPARKMIND_PATH_ENV_KEYS = (
     "SPARKMIND_PATH",
     "SPARKMIND_ROOT",
 )
+SPARKMIND_LOCAL_RELATIVE_PATHS = (
+    Path("third_party") / "SparkMind",
+    Path("SparkMind"),
+)
 
 
 def _normalize_path(path: Path | str) -> Path:
@@ -45,6 +49,14 @@ def iter_env_paths(env_keys: Sequence[str]) -> Iterator[Path]:
     yield from iter_unique_paths(raw_candidates)
 
 
+def iter_local_sparkmind_roots(repo_root: Path | None = None) -> Iterator[Path]:
+    """Yield local SparkMind checkout candidates for an editable SDK checkout."""
+    root_path = _normalize_path(repo_root or Path(__file__).resolve().parents[1])
+    yield from iter_unique_paths(
+        root_path / relative_path for relative_path in SPARKMIND_LOCAL_RELATIVE_PATHS
+    )
+
+
 def format_optional_dependency_error(
     dependency_label: str,
     import_error: BaseException | None = None,
@@ -73,17 +85,22 @@ def format_optional_dependency_error(
 
 def configure_optional_import_paths(
     env_keys: Sequence[str] = SPARKMIND_PATH_ENV_KEYS,
+    include_local_sparkmind: bool = True,
 ) -> list[Path]:
-    """Add optional dependency roots from environment variables to sys.path."""
+    """Add optional dependency roots from environment variables and local checkouts to sys.path."""
+    candidates: list[Path] = list(iter_env_paths(env_keys))
+    if include_local_sparkmind:
+        candidates.extend(iter_local_sparkmind_roots())
+
     added_paths: list[Path] = []
-    for candidate in iter_env_paths(env_keys):
+    for candidate in reversed(list(iter_unique_paths(candidates))):
         if not candidate.is_dir():
             continue
         candidate_str = str(candidate)
         if candidate_str in sys.path:
             continue
         sys.path.insert(0, candidate_str)
-        added_paths.append(candidate)
+        added_paths.insert(0, candidate)
     return added_paths
 
 

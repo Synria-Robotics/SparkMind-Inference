@@ -29,14 +29,18 @@ source .venv/bin/activate
 如果当前环境还没装完整依赖，至少需要保证脚本相关依赖可用，例如：
 
 ```bash
-pip install -e ".[all,examples]"
+uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果你使用本地 `SparkMind` checkout，也可以额外安装：
+如果你使用本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind` 并额外安装：
 
 ```bash
-pip install -e ./SparkMind
+mkdir -p third_party
+git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
+uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+如果已经进入 `third_party/SparkMind` 目录，也可以执行 `uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple`。
 
 你还需要准备：
 

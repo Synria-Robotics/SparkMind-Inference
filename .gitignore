@@ -3,6 +3,10 @@
 /models/
 data/
 models/
+# Local third-party checkouts
+/third_party/
+./third_party/
+
 # Local runtime outputs and caches
 /.cache/
 /outputs/
