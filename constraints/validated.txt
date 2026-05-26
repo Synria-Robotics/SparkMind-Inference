@@ -1,5 +1,5 @@
 # Top-level dependency versions validated for the synchronous inference SDK.
-# Validated on Python 3.13 with external LeRobot v0.5.1 and SparkMind.
+# Validated on Python 3.13 with external LeRobot v0.5.1 and SparkMind 1.0.0rc2.
 # Use with: uv pip install -e ".[all,examples]" -c constraints/validated.txt
 
 av==15.1.0
@@ -13,7 +13,7 @@ opencv-python==4.13.0.92
 PyYAML==6.0.3
 safetensors==0.7.0
 sentencepiece==0.2.1
-sparkmind==1.0.0
+sparkmind==1.0.0rc2
 tiktoken==0.13.0
 torch==2.10.0
 transformers==5.3.0

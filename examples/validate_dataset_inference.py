@@ -63,11 +63,11 @@ def _ensure_sparkmind_path(repo_root: Path) -> Path:
 
 SPARKMIND_ROOT = _ensure_sparkmind_path(REPO_ROOT)
 
-from inference_sdk import (
+from sparkmind_inference import (
     SmoothingConfig,
     create_engine,
 )
-from inference_sdk.factory import SUPPORTED_MODEL_TYPES, normalize_model_type
+from sparkmind_inference.factory import SUPPORTED_MODEL_TYPES, normalize_model_type
 
 
 def _load_snapshot_download():

@@ -1,16 +1,19 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "inference-sdk"
-version = "1.0.0rc1"
+name = "sparkmind-inference"
+version = "1.0.0rc2"
 description = "Standalone inference SDK for ACT, SmolVLA, PI0, and PI0.5 policy inference."
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [
   { name = "Synria Robotics" },
 ]
+keywords = ["robotics", "imitation-learning", "vla", "act", "lerobot", "libero"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -31,7 +34,7 @@ dependencies = [
 act = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
-  "sparkmind>=1.0.0",
+  "sparkmind==1.0.0rc2",
 ]
 examples = [
   "av>=14.0.0,<16.0.0",
@@ -42,7 +45,7 @@ vla = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
   "sentencepiece>=0.1.99",
-  "sparkmind[pi]>=1.0.0",
+  "sparkmind[pi]==1.0.0rc2",
   "tiktoken>=0.6.0",
   "transformers==5.3.0",
 ]
@@ -51,7 +54,7 @@ all = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
   "sentencepiece>=0.1.99",
-  "sparkmind[pi,libero]>=1.0.0",
+  "sparkmind[pi,libero]==1.0.0rc2",
   "tiktoken>=0.6.0",
   "transformers==5.3.0",
   "lerobot[pi,smolvla,libero]==0.5.1",
@@ -65,4 +68,4 @@ Repository = "https://github.com/Synria-Robotics/SparkMind-Inference"
 Issues = "https://github.com/Synria-Robotics/SparkMind-Inference/issues"
 
 [tool.setuptools.packages.find]
-include = ["inference_sdk*"]
+include = ["sparkmind_inference*"]

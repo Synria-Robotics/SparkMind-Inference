@@ -34,8 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from inference_sdk import InferenceSDK, SmoothingConfig  # noqa: E402
-from inference_sdk.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
+from sparkmind_inference import InferenceSDK, SmoothingConfig  # noqa: E402
+from sparkmind_inference.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
 
 
 class OpenCVCameraReader:

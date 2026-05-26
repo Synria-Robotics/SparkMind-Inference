@@ -38,8 +38,8 @@ def _ensure_sparkmind_path(repo_root: Path) -> None:
 
 _ensure_sparkmind_path(REPO_ROOT)
 
-from inference_sdk import InferenceSDK, SmoothingConfig  # noqa: E402
-from inference_sdk.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
+from sparkmind_inference import InferenceSDK, SmoothingConfig  # noqa: E402
+from sparkmind_inference.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
 from validate_dataset_inference import (  # noqa: E402
     _adapt_state_for_sdk,
     _parse_camera_map,
