@@ -1,6 +1,6 @@
 # Inference SDK
 
-`inference-sdk` 是一个独立的 Python SDK，用于 ACT、SmolVLA、PI0 等 policy 模型推理。PI0.5 入口保留为 experimental。
+`inference-sdk` 是一个独立的 Python SDK，用于 ACT、SmolVLA、PI0 和 PI0.5 policy 模型推理。
 
 它只关注一件事：
 
@@ -21,9 +21,9 @@ SDK 的 ACT / SmolVLA / PI0 / PI0.5 engine 依赖 `SparkMind` 模型实现。推
 
 ```bash
 mkdir -p third_party
-git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
-uv pip install -e "third_party/SparkMind[pi,libero]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+git clone https://github.com/Synria-Robotics/SparkMind.git third_party/SparkMind
+uv pip install -e "third_party/SparkMind[pi,libero]"
+uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
 如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。`pyproject.toml` 会声明 `sparkmind>=1.0.0`，但不会把 SDK 绑死到某个远端 SparkMind commit；这样本地迁移分支可以作为唯一实现来源。
@@ -31,16 +31,16 @@ uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi
 可选依赖：
 
 ```bash
-uv pip install -e ".[act]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[vla]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[all]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[act]" -c constraints/validated.txt
+uv pip install -e ".[examples]" -c constraints/validated.txt
+uv pip install -e ".[vla]" -c constraints/validated.txt
+uv pip install -e ".[all]" -c constraints/validated.txt
 ```
 
 如果需要运行 dataset 验证和绘图示例，推荐直接安装：
 
 ```bash
-uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
 `pyproject.toml` 使用经过验证的版本范围；`constraints/validated.txt` 固定当前验证环境的顶层依赖版本。当前验证主线是 Python 3.13、外部 LeRobot v0.5.1、SparkMind 1.0.0、transformers 5.3.0。
@@ -49,12 +49,12 @@ uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi
 
 预训练好的模型和 LeRobot / LIBERO 数据集可以直接从 Hugging Face 下载。`examples/validate_dataset_inference.py` 的 `--model` 和 `--dataset` 都支持传本地路径或 Hugging Face repo id；传 repo id 时脚本会自动调用 `huggingface_hub.snapshot_download()`，并缓存到仓库内 `.cache/huggingface/`。
 
-如果在校园网环境需要代理，可以先设置：
+如果访问 Hugging Face 需要代理，可以按你的网络环境设置：
 
 ```bash
-export HTTP_PROXY=http://proxy.cse.cuhk.edu.hk:8000
-export HTTPS_PROXY=http://proxy.cse.cuhk.edu.hk:8000
-export ALL_PROXY=http://proxy.cse.cuhk.edu.hk:8000
+export HTTP_PROXY=http://host:port
+export HTTPS_PROXY=http://host:port
+export ALL_PROXY=http://host:port
 ```
 
 也可以先手动下载到本地再运行验证：
@@ -70,7 +70,7 @@ hf download <dataset_repo_id> --repo-type dataset --local-dir data/lerobot/<data
 - `images` 使用相机角色名作为 key，例如 `head`、`wrist`；可用角色以 `metadata.required_cameras` 为准。
 - 每张图像应是 BGR 格式的 `numpy.ndarray`，形状为 `(H, W, 3)`。
 - `state` 应是一维 `numpy.ndarray`，维度需要和模型 `observation.state` 一致。
-- ACT、SmolVLA、PI0 作为 stable 推理路径；PI0.5 可通过 `algorithm_type="pi05"` 使用，但当前标记为 experimental。
+- ACT、SmolVLA、PI0 和 PI0.5 作为已验证推理路径；PI0.5 可通过 `algorithm_type="pi05"` 使用。
 - SDK 对外按 robot-space 处理夹爪，输入/输出最后一维夹爪通常是 `[0, 1000]`。
 - `predict_action_chunk()` 和 `predict_action()` 都在调用线程同步执行，不启动后台推理线程。
 - `load_policy()`、observation 校验和推理错误会抛出 SDK 自定义异常，方便上位机按错误类型处理。
@@ -126,7 +126,7 @@ with InferenceSDK(
         send_robot_action(action)
 ```
 
-PI0.5 可使用 `algorithm_type="pi05"`，`"pi0.5"` / `"pi0_5"` / `"pi0-5"` 也会自动归一到 `pi05`。该路径当前为 experimental，建议发布口径中优先使用 ACT、SmolVLA 和 PI0。
+PI0.5 可使用 `algorithm_type="pi05"`，`"pi0.5"` / `"pi0_5"` / `"pi0-5"` 也会自动归一到 `pi05`。
 
 如果只需要执行一次推理，也可以使用一次性 API：
 
@@ -196,7 +196,7 @@ engine = create_engine(
 )
 ```
 
-SmolVLA、PI0 可以开启 RTC；PI0.5 的 RTC 路径保留为 experimental。`rtc_inference_delay_steps` 是静态延迟步数；如果你的控制环能测出实际推理延迟，可以按 tick 数传入：
+SmolVLA、PI0 和 PI0.5 可以开启 RTC。`rtc_inference_delay_steps` 是静态延迟步数；如果你的控制环能测出实际推理延迟，可以按 tick 数传入：
 
 ```python
 engine = create_engine(
@@ -211,7 +211,7 @@ engine = create_engine(
 )
 ```
 
-说明：ACT 时间集成当前用于同步 `engine.step()` / `select_action()`；SmolVLA、PI0 的 RTC 也在同步推理路径中生效。
+说明：ACT 时间集成当前用于同步 `engine.step()` / `select_action()`；SmolVLA、PI0 和 PI0.5 的 RTC 也在同步推理路径中生效。
 
 ## 同步参数
 
@@ -222,7 +222,7 @@ engine = create_engine(
 - `fallback_mode`：同步动作队列为空时的行为；`hold` 使用当前 robot state，`repeat` 重复上一条动作。
 - `enable_gripper_clamping`：是否对夹爪动作做速度限制，真机可开启，离线曲线对比时可关闭。
 - `enable_temporal_ensemble`：为 ACT 的同步 `step()` 开启在线时间集成。
-- `enable_rtc`：为 SmolVLA / PI0 开启 RTC；PI0.5 路径为 experimental。
+- `enable_rtc`：为 SmolVLA / PI0 / PI0.5 开启 RTC。
 - `rtc_prefix_attention_schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`。
 - `rtc_execution_horizon` / `rtc_inference_delay_steps`：RTC 执行窗口和静态推理延迟步数。
 

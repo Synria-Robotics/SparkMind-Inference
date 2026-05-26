@@ -303,7 +303,7 @@ class InferenceSDK:
             action_dim=int(policy.action_dim),
             chunk_size=int(policy.chunk_size),
             n_action_steps=int(policy.n_action_steps),
-            stability="experimental" if policy.model_type == "pi05" else "stable",
+            stability="stable",
             requested_device=device_status.get("requested_device"),
             actual_device=device_status.get("actual_device"),
             device_warning=device_status.get("device_warning") or "",

@@ -21,7 +21,6 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
 
 from ..base import BaseInferenceEngine, SmoothingConfig
@@ -611,7 +610,10 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 "PI05 模型所需的 SparkMind / transformers",
                 PI05_IMPORT_ERROR,
                 min_python=(3, 12),
-                install_hint="请先安装本地 SparkMind checkout，例如 `uv pip install -e \"third_party/SparkMind[pi,libero]\" -i https://pypi.tuna.tsinghua.edu.cn/simple`。",
+                install_hint=(
+                    "请先安装 SparkMind，例如 `uv pip install \"sparkmind[pi,libero]>=1.0.0\"` "
+                    "或 `uv pip install -e \"third_party/SparkMind[pi,libero]\"`。"
+                ),
             )
 
         valid, error = self.validate_checkpoint(checkpoint_dir)
@@ -824,8 +826,6 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 inverse=False,
             )
 
-        if state_tensor.shape[-1] < self._max_state_dim:
-            state_tensor = F.pad(state_tensor, (0, self._max_state_dim - state_tensor.shape[-1]))
         return state_tensor
 
     def _build_prompt(self, instruction: str, normalized_state: torch.Tensor) -> str:

@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inference-sdk"
-version = "0.1.0"
+version = "1.0.0rc1"
 description = "Standalone inference SDK for ACT, SmolVLA, PI0, and PI0.5 policy inference."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
+authors = [
+  { name = "Synria Robotics" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "numpy>=2.0.0,<2.3.0",
   "opencv-python>=4.10.0,<4.14.0",
@@ -42,10 +54,15 @@ all = [
   "sparkmind[pi,libero]>=1.0.0",
   "tiktoken>=0.6.0",
   "transformers==5.3.0",
-  "lerobot[pi,smolvla,libero] @ git+https://github.com/huggingface/lerobot.git@v0.5.1",
+  "lerobot[pi,smolvla,libero]==0.5.1",
   "huggingface-hub>=1.0.0,<2.0.0",
   "matplotlib>=3.8.0,<3.11.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Synria-Robotics/SparkMind-Inference"
+Repository = "https://github.com/Synria-Robotics/SparkMind-Inference"
+Issues = "https://github.com/Synria-Robotics/SparkMind-Inference/issues"
 
 [tool.setuptools.packages.find]
 include = ["inference_sdk*"]

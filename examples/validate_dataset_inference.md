@@ -17,7 +17,7 @@
 建议先进入仓库根目录并激活环境：
 
 ```bash
-cd /home/synria/demo/Inference-SDK
+cd /path/to/SparkMind-Inference
 source .venv/bin/activate
 ```
 
@@ -25,21 +25,21 @@ source .venv/bin/activate
 
 ```bash
 mkdir -p third_party
-git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
-uv pip install -e "third_party/SparkMind[pi,libero]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+git clone https://github.com/Synria-Robotics/SparkMind.git third_party/SparkMind
+uv pip install -e "third_party/SparkMind[pi,libero]"
+uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
 如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。
 
 预训练模型和数据集可以从 Hugging Face 下载。`--model` 和 `--dataset` 都可以传本地路径或 Hugging Face repo id；传 repo id 时脚本会自动下载并缓存到 `.cache/huggingface/`。
 
-如果校园网访问 Hugging Face 需要代理，先设置：
+如果访问 Hugging Face 需要代理，按你的网络环境设置：
 
 ```bash
-export HTTP_PROXY=http://proxy.cse.cuhk.edu.hk:8000
-export HTTPS_PROXY=http://proxy.cse.cuhk.edu.hk:8000
-export ALL_PROXY=http://proxy.cse.cuhk.edu.hk:8000
+export HTTP_PROXY=http://host:port
+export HTTPS_PROXY=http://host:port
+export ALL_PROXY=http://host:port
 ```
 
 也可以先手动下载到本地：

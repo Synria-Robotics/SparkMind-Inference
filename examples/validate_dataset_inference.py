@@ -77,7 +77,7 @@ def _load_snapshot_download():
         raise RuntimeError(
             "Missing dependency: huggingface_hub\n"
             "Install example dependencies first, for example:\n"
-            "  uv pip install -e '.[all,examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple"
+            "  uv pip install -e '.[all,examples]'"
         ) from exc
     return snapshot_download
 
@@ -89,7 +89,7 @@ def _load_dataset_class():
         raise RuntimeError(
             "Missing dependency: LeRobotDataset\n"
             "Install external LeRobot v0.5.1 first, for example:\n"
-            "  python -m pip install 'lerobot @ git+https://github.com/huggingface/lerobot.git@v0.5.1'"
+            "  python -m pip install 'lerobot[pi,smolvla,libero]==0.5.1'"
         ) from exc
     return LeRobotDataset
 
@@ -104,7 +104,7 @@ def _load_pyplot():
         raise RuntimeError(
             "Missing dependency: matplotlib\n"
             "Install example dependencies first, for example:\n"
-            "  uv pip install -e '.[examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple"
+            "  uv pip install -e '.[examples]'"
         ) from exc
     return plt
 

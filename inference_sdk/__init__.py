@@ -1,5 +1,5 @@
 """
-Inference SDK package for ACT, SmolVLA, PI0 and experimental PI0.5 models.
+Inference SDK package for ACT, SmolVLA, PI0 and PI0.5 models.
 
 Provides synchronous policy inference helpers:
 - High-level InferenceSDK facade
@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 logger = logging.getLogger(__name__)
-__version__ = "0.1.0"
+__version__ = "1.0.0rc1"
 
 from .exceptions import (  # noqa: E402
     CheckpointNotFoundError,
