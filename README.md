@@ -15,7 +15,7 @@
 ```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
-uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e . -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 如果需要使用本地 `SparkMind`，推荐放在仓库内的 `third_party/SparkMind`：
@@ -31,17 +31,19 @@ uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/sim
 可选依赖：
 
 ```bash
-uv pip install -e ".[act]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[vla]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-uv pip install -e ".[all]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[act]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[vla]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[all]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 如果需要运行 dataset 验证和绘图示例，推荐直接安装：
 
 ```bash
-uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+`pyproject.toml` 使用经过验证的版本范围；`constraints/validated.txt` 固定当前验证环境的顶层依赖版本，用于复现实验和部署。
 
 ## Hugging Face 下载
 
@@ -238,7 +240,7 @@ OpenCV 相机示例：
 ```bash
 python examples/alicia_m_sync_runtime.py \
   --model-type act \
-  --checkpoint-dir models/ACT_pick_and_place_v2 \
+  --checkpoint-dir /path/to/act_checkpoint \
   --device cuda:0 \
   --port /dev/ttyACM0 \
   --camera head=0 \
@@ -251,7 +253,7 @@ ACT 可以开启同步时间集成：
 ```bash
 python examples/alicia_m_sync_runtime.py \
   --model-type act \
-  --checkpoint-dir models/ACT_pick_and_place_v2 \
+  --checkpoint-dir /path/to/act_checkpoint \
   --device cuda:0 \
   --port /dev/ttyACM0 \
   --camera head=0 \
@@ -268,9 +270,9 @@ python examples/alicia_m_sync_runtime.py \
 
 ```bash
 python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
+  --model /path/to/act_checkpoint \
   --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --execution-mode raw
 ```
@@ -279,9 +281,9 @@ python examples/validate_dataset_inference.py \
 
 ```bash
 python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
+  --model /path/to/act_checkpoint \
   --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --execution-mode step \
   --temporal-ensemble
@@ -360,7 +362,8 @@ python examples/validate_dataset_inference.py \
 
 - 如果 raw 也不对，优先检查 checkpoint、`config.json`、processor stats、模型类型和 instruction。
 - 如果 raw 正常但 `step` 不对，再检查 `n_action_steps`、`control_fps`、ACT 时间集成或 RTC 配置。
-- PI0 / PI0.5 会按 checkpoint 的 `normalization_mapping` 做 state/action 归一化和反归一化；如果权重加载出现大量 missing/unexpected keys，启动日志会给出 warning。
+- PI0 / PI0.5 的权重加载现在会严格校验 missing/unexpected keys；如果 checkpoint 没有干净加载，SDK 会直接报错，避免误用随机初始化权重。
+- LeRobot 官方 PI checkpoint 会尽量保持和官方 processor 一致的 state/action 边界语义；legacy 导出格式继续使用 SDK stats 归一化。
 
 ### 离线环境加载 PI0 / PI0.5 tokenizer 失败
 

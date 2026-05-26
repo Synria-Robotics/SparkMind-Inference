@@ -116,11 +116,11 @@ def _load_pyplot():
 
 
 def _default_model_source() -> str:
-    return str(REPO_ROOT / "models" / "ACT_pick_and_place_v2")
+    return "lerobot/smolvla_libero"
 
 
 def _default_dataset_source() -> str:
-    return str(REPO_ROOT / "data" / "lerobot" / "z18820636149" / "pick_and_place_data90")
+    return "lerobot/libero"
 
 
 def _default_device() -> str:

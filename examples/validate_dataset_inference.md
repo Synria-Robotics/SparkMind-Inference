@@ -24,7 +24,7 @@ source .venv/bin/activate
 安装验证脚本依赖：
 
 ```bash
-uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 如果使用本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind` 并安装：
@@ -67,9 +67,9 @@ hf download <dataset_repo_id> --repo-type dataset --local-dir data/lerobot/<data
 
 ```bash
 python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
+  --model /path/to/act_checkpoint \
   --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --device cuda:0
 ```
@@ -78,9 +78,9 @@ python examples/validate_dataset_inference.py \
 
 ```bash
 python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
+  --model /path/to/act_checkpoint \
   --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --temporal-ensemble
 ```
@@ -89,9 +89,9 @@ python examples/validate_dataset_inference.py \
 
 ```bash
 python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
+  --model /path/to/act_checkpoint \
   --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
+  --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --execution-mode step
 ```

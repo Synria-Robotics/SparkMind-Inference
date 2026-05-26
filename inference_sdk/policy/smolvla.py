@@ -26,6 +26,7 @@ import yaml
 from ..base import BaseInferenceEngine, SmoothingConfig
 from ..device import resolve_torch_device
 from ..runtime import format_optional_dependency_error, iter_model_search_roots, iter_unique_paths
+from .gripper_scale import feature_gripper_stats_are_unit_scaled
 from .rtc import make_rtc_config, make_rtc_processor
 
 logger = logging.getLogger(__name__)
@@ -372,6 +373,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         # Image resize target for SmolVLA. If None, keep native resolution.
         self._image_resize: Optional[Tuple[int, int]] = (512, 512)
         self._rtc_prev_chunk_left_over: Optional[torch.Tensor] = None
+        self._state_gripper_stats_unit_scaled = True
+        self._action_gripper_stats_unit_scaled = True
 
     @staticmethod
     def validate_checkpoint(checkpoint_dir: str) -> Tuple[bool, str]:
@@ -442,6 +445,14 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
                 required_image_features = _load_pretrained_required_image_features(checkpoint_path)
 
             self._apply_action_chunk_overrides(self.config_dict)
+            self._state_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
+                self.stats,
+                "observation.state",
+            )
+            self._action_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
+                self.stats,
+                "action",
+            )
             
             # Parse camera requirements from image_features
             image_features = self.config_dict.get("image_features", [])
@@ -555,6 +566,11 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             logger.info(f"State dim: {self.state_dim}, Action dim: {self.action_dim}")
             logger.info(f"Chunk size: {self.chunk_size}, N action steps: {self.n_action_steps}")
             logger.info(f"VLM: {vlm_model_source}")
+            logger.info(
+                "SmolVLA gripper stats units: state=%s action=%s",
+                "normalized" if self._state_gripper_stats_unit_scaled else "robot",
+                "normalized" if self._action_gripper_stats_unit_scaled else "robot",
+            )
             
             self.is_loaded = True
             
@@ -568,9 +584,7 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             return True, ""
             
         except Exception as e:
-            logger.error(f"Failed to load SmolVLA model: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Failed to load SmolVLA model")
             return False, _format_smolvla_load_error(e, vlm_model_source)
     
     def set_instruction(self, instruction: str) -> bool:
@@ -627,36 +641,6 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         # Convert attention mask to boolean as required by SmolVLA model
         self._instruction_attention_mask = tokens["attention_mask"].bool().to(self.device)
     
-    def _resize_with_pad(self, img: np.ndarray, target_h: int, target_w: int, 
-                         pad_value: int = 0) -> np.ndarray:
-        """
-        Resize image while maintaining aspect ratio and pad to target size.
-        
-        Args:
-            img: Input image (H, W, 3)
-            target_h: Target height
-            target_w: Target width
-            pad_value: Padding value
-            
-        Returns:
-            Resized and padded image (target_h, target_w, 3)
-        """
-        h, w = img.shape[:2]
-        scale = min(target_h / h, target_w / w)
-        new_h, new_w = int(h * scale), int(w * scale)
-        
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        
-        # Create padded image
-        padded = np.full((target_h, target_w, 3), pad_value, dtype=np.uint8)
-        
-        # Center the resized image
-        y_offset = (target_h - new_h) // 2
-        x_offset = (target_w - new_w) // 2
-        padded[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
-        
-        return padded
-
     def _resize_tensor_with_pad(self, img: torch.Tensor, target_h: int, target_w: int, pad_value: float = 0.0) -> torch.Tensor:
         if img.ndim != 4:
             raise ValueError(f"(b,c,h,w) expected, got {tuple(img.shape)}")
@@ -719,8 +703,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         """
         state = state.copy()
         
-        # Scale gripper from [0, 1000] to [0, 1]
-        if len(state) >= 7:
+        # Scale gripper only when checkpoint stats expect normalized gripper units.
+        if len(state) >= 7 and self._state_gripper_stats_unit_scaled:
             state[-1] = state[-1] / 1000.0
         
         state_tensor = torch.from_numpy(state).float()
@@ -755,8 +739,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         
         action = action.numpy()
         
-        # Scale gripper from [0, 1] to [0, 1000]
-        if len(action) >= 7:
+        # Scale gripper only when checkpoint stats store normalized gripper units.
+        if len(action) >= 7 and self._action_gripper_stats_unit_scaled:
             action[-1] = action[-1] * 1000.0
         
         return action

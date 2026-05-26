@@ -8,7 +8,7 @@ InferenceSDK.predict_action(), and publish the selected action.
 Example:
     python examples/alicia_m_sync_runtime.py \
       --model-type act \
-      --checkpoint-dir models/ACT_pick_and_place_v2 \
+      --checkpoint-dir /path/to/act_checkpoint \
       --device cuda:0 \
       --port /dev/ttyACM0 \
       --camera head=0 \

@@ -21,6 +21,7 @@ import yaml
 from ..base import ACTTemporalEnsembler, BaseInferenceEngine, SmoothingConfig
 from ..device import resolve_torch_device
 from ..runtime import format_optional_dependency_error
+from .gripper_scale import feature_gripper_stats_are_unit_scaled
 
 logger = logging.getLogger(__name__)
 
@@ -153,29 +154,6 @@ def _load_pretrained_act_stats(checkpoint_path: Path) -> Dict[str, Dict[str, Any
         raise FileNotFoundError("导出模型缺少可用的预处理/后处理统计")
 
     return stats
-
-
-def _feature_gripper_stats_are_unit_scaled(
-    stats: Optional[Dict[str, Dict[str, Any]]],
-    feature_name: str,
-) -> bool:
-    """Infer whether the last feature dimension was stored in [0, 1] scale."""
-    if not stats or feature_name not in stats:
-        return True
-
-    feature_stats = stats[feature_name]
-    last_dim_values: list[float] = []
-    for stat_name in ("mean", "std", "min", "max", "q01", "q10", "q50", "q90", "q99"):
-        if stat_name not in feature_stats:
-            continue
-        stat_array = np.asarray(feature_stats[stat_name], dtype=np.float32).reshape(-1)
-        if stat_array.size:
-            last_dim_values.append(abs(float(stat_array[-1])))
-
-    if not last_dim_values:
-        return True
-
-    return max(last_dim_values) <= 1.5
 
 
 def _load_act_state_dict(checkpoint_path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
@@ -318,11 +296,11 @@ class ACTInferenceEngine(BaseInferenceEngine):
                 config_dict = _convert_pretrained_act_config(pretrained_config)
                 self.stats = _load_pretrained_act_stats(checkpoint_path)
 
-            self._state_gripper_stats_unit_scaled = _feature_gripper_stats_are_unit_scaled(
+            self._state_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
                 self.stats,
                 "observation.state",
             )
-            self._action_gripper_stats_unit_scaled = _feature_gripper_stats_are_unit_scaled(
+            self._action_gripper_stats_unit_scaled = feature_gripper_stats_are_unit_scaled(
                 self.stats,
                 "action",
             )
@@ -408,9 +386,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
             return True, ""
             
         except Exception as e:
-            logger.error(f"Failed to load ACT model: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Failed to load ACT model")
             return False, f"模型加载失败: {str(e)}"
     
     def _preprocess_images(self, images: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:

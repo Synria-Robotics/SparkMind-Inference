@@ -1,0 +1,15 @@
+# Top-level dependency versions validated for the synchronous inference SDK.
+# Use with: uv pip install -e ".[all,examples]" -c constraints/validated.txt
+
+av==15.1.0
+datasets==4.8.5
+huggingface-hub==1.16.1
+lerobot==0.4.4
+matplotlib==3.10.9
+numpy==2.2.6
+omegaconf==2.3.0
+opencv-python==4.13.0.92
+PyYAML==6.0.3
+safetensors==0.7.0
+torch==2.10.0
+transformers==5.9.0

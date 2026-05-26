@@ -34,8 +34,10 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 try:
+    from safetensors import safe_open as safe_open_safetensors
     from safetensors.torch import load_file as load_safetensors_file
 except ImportError:
+    safe_open_safetensors = None
     load_safetensors_file = None
 
 
@@ -141,6 +143,65 @@ def _extract_stats_from_safetensors(state_path: Path) -> Dict[str, Dict[str, Any
         stats.setdefault(feature_name, {})[stat_name] = value.cpu().tolist()
 
     return stats
+
+
+def _extract_model_buffer_stats(checkpoint_path: Path) -> Dict[str, Dict[str, Any]]:
+    if safe_open_safetensors is None:
+        raise RuntimeError("缺少 safetensors 依赖，无法读取 model.safetensors 统计")
+
+    model_path = checkpoint_path / "model.safetensors"
+    if not model_path.is_file():
+        return {}
+
+    stats: Dict[str, Dict[str, Any]] = {}
+    key_map = {
+        "normalize_inputs.buffer_observation_state": "observation.state",
+        "normalize_targets.buffer_action": "action",
+        "unnormalize_outputs.buffer_action": "action",
+    }
+    stat_names = {"mean", "std", "min", "max", "q01", "q99", "q10", "q90"}
+
+    with safe_open_safetensors(str(model_path), framework="pt", device="cpu") as tensors:
+        for tensor_key in tensors.keys():
+            prefix, _, stat_name = tensor_key.rpartition(".")
+            feature_key = key_map.get(prefix)
+            if feature_key is None or stat_name not in stat_names:
+                continue
+            stats.setdefault(feature_key, {})[stat_name] = tensors.get_tensor(tensor_key).cpu().tolist()
+
+    return stats
+
+
+def _load_external_stats_from_env(*env_names: str) -> Dict[str, Dict[str, Any]]:
+    for env_name in env_names:
+        stats_path = os.environ.get(env_name)
+        if not stats_path:
+            continue
+        path = Path(stats_path).expanduser()
+        if path.is_file():
+            with open(path, "r") as f:
+                return json.load(f)
+    return {}
+
+
+def _apply_processor_normalization_mapping(checkpoint_path: Path, config_dict: Dict[str, Any]) -> None:
+    if config_dict.get("normalization_mapping"):
+        return
+
+    for config_name in (PREPROCESSOR_CONFIG_FILENAME, POSTPROCESSOR_CONFIG_FILENAME):
+        config_path = checkpoint_path / config_name
+        if not config_path.is_file():
+            continue
+        with open(config_path, "r") as f:
+            processor_config = json.load(f)
+        for step in processor_config.get("steps", []):
+            registry_name = str(step.get("registry_name", ""))
+            if "normalizer" not in registry_name:
+                continue
+            norm_map = (step.get("config") or {}).get("norm_map")
+            if norm_map:
+                config_dict["normalization_mapping"] = norm_map
+                return
 
 
 def _normalization_mode_name(value: Any) -> str:
@@ -250,64 +311,15 @@ def _load_pretrained_pi05_stats(checkpoint_path: Path) -> Dict[str, Dict[str, An
                 stats.setdefault(feature_name, {}).update(feature_stats)
 
     if not stats:
+        stats = _extract_model_buffer_stats(checkpoint_path)
+
+    if not stats:
+        stats = _load_external_stats_from_env("PI05_STATS_PATH", "PI0_STATS_PATH")
+
+    if not stats:
         raise FileNotFoundError("导出模型缺少可用的预处理/后处理统计")
 
     return stats
-
-
-def _load_pi05_state_dict(checkpoint_path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
-    safetensors_path = checkpoint_path / "model.safetensors"
-    if safetensors_path.is_file():
-        if load_safetensors_file is None:
-            raise RuntimeError("缺少 safetensors 依赖，无法读取 model.safetensors")
-
-        try:
-            return load_safetensors_file(str(safetensors_path), device=str(device))
-        except Exception:
-            return load_safetensors_file(str(safetensors_path), device="cpu")
-
-    model_path = checkpoint_path / "model.pth"
-    try:
-        return torch.load(model_path, map_location=device, weights_only=True)
-    except TypeError:
-        return torch.load(model_path, map_location=device)
-
-
-def _remap_pi05_state_dict_for_model(
-    state_dict: Dict[str, torch.Tensor],
-    model_state_dict: Dict[str, torch.Tensor],
-) -> tuple[Dict[str, torch.Tensor], int, list[str]]:
-    model_keys = set(model_state_dict.keys())
-    remapped: Dict[str, torch.Tensor] = {}
-    remap_count = 0
-    skipped_shape_mismatches: list[str] = []
-
-    for key, value in state_dict.items():
-        candidates = [key]
-        if ".vision_tower.vision_model." in key:
-            candidates.append(key.replace(".vision_tower.vision_model.", ".vision_tower."))
-
-        selected_key = key
-        for candidate in candidates:
-            expected = model_state_dict.get(candidate)
-            if expected is None:
-                continue
-            if tuple(expected.shape) == tuple(value.shape):
-                selected_key = candidate
-                break
-            skipped_shape_mismatches.append(
-                f"{candidate}: checkpoint={tuple(value.shape)} model={tuple(expected.shape)}"
-            )
-
-        if selected_key in remapped and selected_key != key:
-            logger.warning("Skipping duplicate PI05 checkpoint key after remap: %s -> %s", key, selected_key)
-            continue
-
-        remapped[selected_key] = value
-        if selected_key != key and selected_key in model_keys:
-            remap_count += 1
-
-    return remapped, remap_count, skipped_shape_mismatches
 
 
 def _is_local_model_dir(path: Path) -> bool:
@@ -468,6 +480,7 @@ try:
     from sparkmind.lerobot_compat.configs.types import FeatureType, NormalizationMode, PolicyFeature
     from sparkmind.lerobot_compat.policies.pi05.configuration_pi05 import PI05Config
     from sparkmind.lerobot_compat.policies.pi05.modeling_pi05 import PI05Policy
+    from sparkmind.lerobot_compat.policies.pi_common import load_pi_core_model_weights
     from sparkmind.learning.VLA.models.pi05_model import PI05Pytorch
 
     PI05_AVAILABLE = True
@@ -551,6 +564,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
 
         self._state_gripper_uses_robot_units: bool = False
         self._action_gripper_uses_robot_units: bool = False
+        self._state_action_normalization: str = "sdk_stats"
 
         self._camera_key_to_role: Dict[str, str] = {}
         self._role_to_camera_key: Dict[str, str] = {}
@@ -609,6 +623,9 @@ class PI05InferenceEngine(BaseInferenceEngine):
         self.tokenizer_source = tokenizer_source
 
         try:
+            self._state_action_normalization = (
+                "sdk_stats" if _is_legacy_pi05_checkpoint(checkpoint_path) else "external_processor"
+            )
             if _is_legacy_pi05_checkpoint(checkpoint_path):
                 config_path = checkpoint_path / "inference_config.yaml"
                 with open(config_path, "r") as f:
@@ -623,6 +640,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
                     pretrained_config = json.load(f)
 
                 self.config_dict = _convert_pretrained_pi05_config(pretrained_config)
+                _apply_processor_normalization_mapping(checkpoint_path, self.config_dict)
                 self.stats = _load_pretrained_pi05_stats(checkpoint_path)
 
             self._apply_action_chunk_overrides(self.config_dict)
@@ -678,70 +696,14 @@ class PI05InferenceEngine(BaseInferenceEngine):
             self.model.to(self.device)
             self.model.eval()
 
-            original_state_dict = _load_pi05_state_dict(checkpoint_path, self.device)
-            prefixed_model_state_dict = {
-                f"model.{key}": value
-                for key, value in self.model.state_dict().items()
-            }
-            original_state_dict, pre_remapped_key_count, pre_skipped_shape_mismatches = _remap_pi05_state_dict_for_model(
-                original_state_dict,
-                prefixed_model_state_dict,
+            missing_keys, unexpected_keys = load_pi_core_model_weights(
+                self.model,
+                checkpoint_path,
+                policy_cls=PI05Policy,
+                config=self.model.config,
+                family="PI05",
+                device=self.device,
             )
-            if pre_remapped_key_count:
-                logger.info("Pre-remapped %s PI05 checkpoint keys before compatibility fix", pre_remapped_key_count)
-            if pre_skipped_shape_mismatches:
-                logger.warning(
-                    "Skipped %s PI05 pre-remaps due to shape mismatch, sample=%s",
-                    len(pre_skipped_shape_mismatches),
-                    pre_skipped_shape_mismatches[:4],
-                )
-
-            class _PolicyShim:
-                __slots__ = ("model",)
-
-                def __init__(self, model):
-                    self.model = model
-
-            shim = _PolicyShim(self.model)
-
-            class _IgnorePi05VisionEmbeddingWarning(logging.Filter):
-                def filter(self, record: logging.LogRecord) -> bool:
-                    return not record.getMessage().startswith("Vision embedding key might need handling:")
-
-            root_logger = logging.getLogger()
-            vision_warning_filter = _IgnorePi05VisionEmbeddingWarning()
-            root_logger.addFilter(vision_warning_filter)
-            try:
-                fixed_state_dict = PI05Policy._fix_pytorch_state_dict_keys(shim, original_state_dict, self.model.config)
-            finally:
-                root_logger.removeFilter(vision_warning_filter)
-
-            inner_state_dict = {
-                (key[6:] if key.startswith("model.") else key): value
-                for key, value in fixed_state_dict.items()
-            }
-            inner_state_dict, remapped_key_count, skipped_shape_mismatches = _remap_pi05_state_dict_for_model(
-                inner_state_dict,
-                self.model.state_dict(),
-            )
-            if remapped_key_count:
-                logger.info("Remapped %s PI05 checkpoint keys to local model layout", remapped_key_count)
-            if skipped_shape_mismatches:
-                logger.warning(
-                    "Skipped %s PI05 checkpoint key remaps due to shape mismatch, sample=%s",
-                    len(skipped_shape_mismatches),
-                    skipped_shape_mismatches[:4],
-                )
-
-            missing_keys, unexpected_keys = self.model.load_state_dict(inner_state_dict, strict=False)
-            if missing_keys or unexpected_keys:
-                logger.warning(
-                    "PI05 weights loaded with strict=False: missing=%s unexpected=%s missing_sample=%s unexpected_sample=%s",
-                    len(missing_keys),
-                    len(unexpected_keys),
-                    list(missing_keys[:8]),
-                    list(unexpected_keys[:8]),
-                )
 
             self.is_loaded = True
             self._init_components()
@@ -758,7 +720,11 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 "robot" if self._action_gripper_uses_robot_units else "normalized",
             )
             logger.info(
-                "PI05 weights loaded with strict=False: missing=%s unexpected=%s",
+                "PI05 preprocessing: %s",
+                self._state_action_normalization,
+            )
+            logger.info(
+                "PI05 weights loaded: missing=%s unexpected=%s",
                 len(missing_keys),
                 len(unexpected_keys),
             )
@@ -766,10 +732,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
             return True, ""
 
         except Exception as e:
-            logger.error("Failed to load PI05 model: %s", e)
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Failed to load PI05 model")
             return False, _format_pi05_load_error(e, tokenizer_source)
 
     def set_instruction(self, instruction: str) -> bool:
@@ -851,14 +814,15 @@ class PI05InferenceEngine(BaseInferenceEngine):
             state[-1] = state[-1] / 1000.0
 
         state_tensor = torch.from_numpy(state).float()
-        state_tensor = _apply_feature_normalization(
-            tensor=state_tensor,
-            key="observation.state",
-            feature_type="STATE",
-            config_dict=self.config_dict,
-            stats=self.stats,
-            inverse=False,
-        )
+        if self._state_action_normalization == "sdk_stats":
+            state_tensor = _apply_feature_normalization(
+                tensor=state_tensor,
+                key="observation.state",
+                feature_type="STATE",
+                config_dict=self.config_dict,
+                stats=self.stats,
+                inverse=False,
+            )
 
         if state_tensor.shape[-1] < self._max_state_dim:
             state_tensor = F.pad(state_tensor, (0, self._max_state_dim - state_tensor.shape[-1]))
@@ -873,14 +837,15 @@ class PI05InferenceEngine(BaseInferenceEngine):
 
     def _postprocess_action(self, action_tensor: torch.Tensor) -> np.ndarray:
         action = action_tensor.cpu()
-        action = _apply_feature_normalization(
-            tensor=action,
-            key="action",
-            feature_type="ACTION",
-            config_dict=self.config_dict,
-            stats=self.stats,
-            inverse=True,
-        )
+        if self._state_action_normalization == "sdk_stats":
+            action = _apply_feature_normalization(
+                tensor=action,
+                key="action",
+                feature_type="ACTION",
+                config_dict=self.config_dict,
+                stats=self.stats,
+                inverse=True,
+            )
 
         action = action.numpy()
 
@@ -901,11 +866,20 @@ class PI05InferenceEngine(BaseInferenceEngine):
         tokens, masks = self._tokenize_prompt(prompt)
 
         image_features = self.config_dict.get("image_features", [])
-        image_list = [processed_images[key] for key in image_features if key in processed_images]
-        if not image_list:
+        present_images = [processed_images[key] for key in image_features if key in processed_images]
+        if not present_images:
             raise RuntimeError("No valid images available for PI05 inference")
 
-        image_masks = [torch.ones(1, dtype=torch.bool, device=self.device) for _ in image_list]
+        image_list = []
+        image_masks = []
+        empty_template = present_images[0]
+        for key in image_features:
+            if key in processed_images:
+                image_list.append(processed_images[key])
+                image_masks.append(torch.ones(1, dtype=torch.bool, device=self.device))
+            else:
+                image_list.append(torch.ones_like(empty_template) * -1.0)
+                image_masks.append(torch.zeros(1, dtype=torch.bool, device=self.device))
 
         actions_chunk = self.model.sample_actions(
             images=image_list,

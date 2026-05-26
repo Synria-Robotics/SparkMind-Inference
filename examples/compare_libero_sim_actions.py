@@ -39,8 +39,8 @@ def _ensure_sparkmind_path(repo_root: Path) -> None:
 
 _ensure_sparkmind_path(REPO_ROOT)
 
-from inference_sdk import InferenceSDK, SmoothingConfig  # noqa: E402
-from validate_dataset_inference import _resolve_model_source, _tensor_image_to_bgr_uint8  # noqa: E402
+from inference_sdk import InferenceSDK, SUPPORTED_MODEL_TYPES, SmoothingConfig  # noqa: E402
+from validate_dataset_inference import _resolve_model_source, _resolve_model_type, _tensor_image_to_bgr_uint8  # noqa: E402
 
 
 @dataclass
@@ -76,9 +76,15 @@ class ActionStats:
         }
 
 
+@dataclass
+class OfficialRTCState:
+    prev_chunk_left_over: torch.Tensor | None = None
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="lerobot/smolvla_libero")
+    parser.add_argument("--model-type", choices=SUPPORTED_MODEL_TYPES, default=None)
     parser.add_argument("--benchmark", default="libero_spatial")
     parser.add_argument("--task-id", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
@@ -91,6 +97,21 @@ def _parse_args() -> argparse.Namespace:
         choices=("step", "fifo", "raw"),
         default="step",
         help="SDK action selection path: timestamped step(), LeRobot-style FIFO chunk queue, or chunk[0] every frame.",
+    )
+    parser.add_argument("--enable-rtc", action="store_true")
+    parser.add_argument("--rtc-execution-horizon", type=int, default=10)
+    parser.add_argument("--rtc-inference-delay-steps", type=int, default=0)
+    parser.add_argument("--rtc-prefix-attention-schedule", default="LINEAR")
+    parser.add_argument("--rtc-max-guidance-weight", type=float, default=10.0)
+    parser.add_argument(
+        "--official-tokenizer-name",
+        default=None,
+        help="Optional tokenizer override for the official LeRobot preprocessor. Default keeps the checkpoint policy behavior.",
+    )
+    parser.add_argument(
+        "--sdk-stats-path",
+        default=None,
+        help="Optional LeRobot stats.json path for PI0/PI0.5 SDK normalization.",
     )
     parser.add_argument("--save-video", action="store_true")
     parser.add_argument("--video-fps", type=float, default=80.0)
@@ -109,36 +130,109 @@ def _set_seed(seed: int, device: str) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _load_official_policy(model_dir: Path, env_cfg: Any, device: str, rename_map: dict[str, str]):
+def _make_official_rtc_config(args: argparse.Namespace):
+    if not args.enable_rtc:
+        return None
+    from lerobot.configs.types import RTCAttentionSchedule
+    from lerobot.policies.rtc.configuration_rtc import RTCConfig
+
+    return RTCConfig(
+        enabled=True,
+        prefix_attention_schedule=RTCAttentionSchedule(str(args.rtc_prefix_attention_schedule).upper()),
+        max_guidance_weight=float(args.rtc_max_guidance_weight),
+        execution_horizon=int(args.rtc_execution_horizon),
+    )
+
+
+def _official_preprocessor_overrides(device: str, rename_map: dict[str, str], official_tokenizer_name: str | None) -> dict[str, Any]:
+    overrides: dict[str, Any] = {
+        "device_processor": {"device": device},
+        "rename_observations_processor": {"rename_map": rename_map},
+    }
+    if official_tokenizer_name:
+        overrides["tokenizer_processor"] = {"tokenizer_name": official_tokenizer_name}
+    return overrides
+
+
+def _load_official_policy(model_dir: Path, env_cfg: Any, device: str, rename_map: dict[str, str], args: argparse.Namespace, model_type: str):
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import make_policy, make_pre_post_processors
 
     cfg = PreTrainedConfig.from_pretrained(model_dir)
     cfg.device = device
     cfg.pretrained_path = str(model_dir)
+    cfg.rtc_config = _make_official_rtc_config(args)
     policy = make_policy(cfg=cfg, env_cfg=env_cfg, rename_map=rename_map)
     policy.eval()
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=cfg,
         pretrained_path=str(model_dir),
-        preprocessor_overrides={
-            "device_processor": {"device": device},
-            "rename_observations_processor": {"rename_map": rename_map},
-        },
+        preprocessor_overrides=_official_preprocessor_overrides(device, rename_map, args.official_tokenizer_name),
     )
     return cfg, policy, preprocessor, postprocessor
 
 
-def _sdk_inputs_from_processed_obs(processed_obs: dict[str, Any]) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
-    images = {
-        "camera1": _tensor_image_to_bgr_uint8(processed_obs["observation.images.image"][0].detach().cpu()),
-        "camera2": _tensor_image_to_bgr_uint8(processed_obs["observation.images.image2"][0].detach().cpu()),
-    }
+def _processed_image_key(camera: str, model_type: str) -> str | None:
+    if camera in {"camera1", "cam_1"}:
+        return "observation.images.image"
+    if camera in {"camera2", "cam_2"}:
+        return "observation.images.image2"
+    if camera in {"image", "image2"}:
+        return f"observation.images.{camera}"
+    if camera.startswith("empty_camera"):
+        return None
+    return f"observation.images.{camera}"
+
+
+def _sdk_inputs_from_processed_obs(
+    processed_obs: dict[str, Any],
+    *,
+    required_cameras: list[str],
+    model_type: str,
+) -> tuple[dict[str, np.ndarray], np.ndarray, str]:
+    images: dict[str, np.ndarray] = {}
+    for camera in required_cameras:
+        key = _processed_image_key(camera, model_type)
+        if key is not None and key in processed_obs:
+            images[camera] = _tensor_image_to_bgr_uint8(processed_obs[key][0].detach().cpu())
     state = processed_obs["observation.state"][0].detach().cpu().numpy().astype(np.float32)
     if state.shape[-1] > 0:
         state[-1] *= 1000.0
     task = processed_obs["task"][0] if isinstance(processed_obs.get("task"), list) else str(processed_obs.get("task", ""))
     return images, state, task
+
+
+def _official_predict_first_action(
+    *,
+    policy: Any,
+    preprocessor: Any,
+    postprocessor: Any,
+    env_postprocessor: Any,
+    observation: dict[str, Any],
+    rtc_state: OfficialRTCState | None,
+    rtc_execution_horizon: int,
+    rtc_inference_delay_steps: int,
+) -> np.ndarray:
+    batch = preprocessor(observation.copy())
+    with torch.inference_mode():
+        if rtc_state is None:
+            action = policy.select_action(batch)
+        else:
+            normalized_chunk = policy.predict_action_chunk(
+                batch,
+                prev_chunk_left_over=rtc_state.prev_chunk_left_over,
+                inference_delay=int(rtc_inference_delay_steps),
+                execution_horizon=int(rtc_execution_horizon),
+            )
+            delay = max(0, int(rtc_inference_delay_steps))
+            rtc_state.prev_chunk_left_over = normalized_chunk.detach()[:, delay:].clone() if delay else normalized_chunk.detach().clone()
+            action = postprocessor(normalized_chunk)[:, 0]
+            action = env_postprocessor({"action": action})["action"]
+            return action.detach().cpu().numpy().astype(np.float32)
+
+        action = postprocessor(action)
+        action = env_postprocessor({"action": action})["action"]
+        return action.detach().cpu().numpy().astype(np.float32)
 
 
 def _write_csv_header(path: Path, action_dim: int) -> None:
@@ -186,6 +280,7 @@ def _append_csv(
 def main() -> int:
     args = _parse_args()
     model_dir, model_label = _resolve_model_source(args.model)
+    model_type = _resolve_model_type(args.model_type, model_dir)
     output_dir = Path(args.output_dir or _default_output_dir(args.model, args.benchmark, args.task_id)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "action_comparison.csv"
@@ -193,10 +288,14 @@ def main() -> int:
     from lerobot.envs.factory import make_env, make_env_config, make_env_pre_post_processors
     from lerobot.envs.utils import add_envs_task, close_envs, preprocess_observation
 
-    rename_map = {
-        "observation.images.image": "observation.images.camera1",
-        "observation.images.image2": "observation.images.camera2",
-    }
+    rename_map = (
+        {
+            "observation.images.image": "observation.images.camera1",
+            "observation.images.image2": "observation.images.camera2",
+        }
+        if model_type == "smolvla"
+        else {}
+    )
     env_cfg = make_env_config(
         "libero",
         task=args.benchmark,
@@ -204,17 +303,29 @@ def main() -> int:
         observation_height=args.image_size,
         observation_width=args.image_size,
     )
-    policy_cfg, official_policy, official_pre, official_post = _load_official_policy(model_dir, env_cfg, args.device, rename_map)
+    policy_cfg, official_policy, official_pre, official_post = _load_official_policy(model_dir, env_cfg, args.device, rename_map, args, model_type)
     env_pre, env_post = make_env_pre_post_processors(env_cfg=env_cfg, policy_cfg=policy_cfg)
     envs = make_env(env_cfg, n_envs=1, use_async_envs=False)
     env = envs[args.benchmark][args.task_id]
 
     sdk = InferenceSDK(
         device=args.device,
-        smoothing_config=SmoothingConfig(control_fps=float(env_cfg.fps), n_action_steps=policy_cfg.n_action_steps),
+        smoothing_config=SmoothingConfig(
+            control_fps=float(env_cfg.fps),
+            n_action_steps=policy_cfg.n_action_steps,
+            enable_rtc=args.enable_rtc,
+            rtc_execution_horizon=args.rtc_execution_horizon,
+            rtc_inference_delay_steps=args.rtc_inference_delay_steps,
+            rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
+            rtc_max_guidance_weight=args.rtc_max_guidance_weight,
+        ),
     )
-    metadata = sdk.load_policy("smolvla", str(model_dir))
+    if model_type in {"pi0", "pi05"} and args.sdk_stats_path:
+        os.environ.setdefault("PI0_STATS_PATH", str(Path(args.sdk_stats_path).expanduser()))
+        os.environ.setdefault("PI05_STATS_PATH", str(Path(args.sdk_stats_path).expanduser()))
+    metadata = sdk.load_policy(model_type, str(model_dir))
     action_dim = int(metadata.action_dim)
+    required_cameras = list(metadata.required_cameras)
     _write_csv_header(csv_path, action_dim)
     stats = ActionStats(action_dim=action_dim)
 
@@ -223,9 +334,10 @@ def main() -> int:
 
     try:
         official_policy.reset()
-        sdk._get_policy("smolvla").reset()
+        sdk._get_policy(model_type).reset()
         observation, _ = env.reset(seed=[args.seed])
         sdk_fifo: deque[np.ndarray] = deque()
+        official_rtc_state = OfficialRTCState() if args.enable_rtc else None
         total_reward = 0.0
         success = False
         steps_taken = 0
@@ -235,23 +347,31 @@ def main() -> int:
             policy_observation = add_envs_task(env, policy_observation)
             policy_observation = env_pre(policy_observation)
 
-            sdk_images, sdk_state, instruction = _sdk_inputs_from_processed_obs(policy_observation)
+            sdk_images, sdk_state, instruction = _sdk_inputs_from_processed_obs(
+                policy_observation,
+                required_cameras=required_cameras,
+                model_type=model_type,
+            )
             _set_seed(args.seed + step, args.device)
-            official_batch = official_pre(policy_observation.copy())
-            with torch.inference_mode():
-                official_action = official_policy.select_action(official_batch)
-                official_action = official_post(official_action)
-                official_action = env_post({"action": official_action})["action"]
-            official_action_np = official_action.detach().cpu().numpy().astype(np.float32)
+            official_action_np = _official_predict_first_action(
+                policy=official_policy,
+                preprocessor=official_pre,
+                postprocessor=official_post,
+                env_postprocessor=env_post,
+                observation=policy_observation,
+                rtc_state=official_rtc_state,
+                rtc_execution_horizon=args.rtc_execution_horizon,
+                rtc_inference_delay_steps=args.rtc_inference_delay_steps,
+            )
 
             _set_seed(args.seed + step, args.device)
             if args.sdk_selection == "step":
-                sdk_action = sdk.predict_action("smolvla", images=sdk_images, state=sdk_state, instruction=instruction)
+                sdk_action = sdk.predict_action(model_type, images=sdk_images, state=sdk_state, instruction=instruction)
             elif args.sdk_selection == "raw":
-                sdk_action = sdk.predict_action_chunk("smolvla", images=sdk_images, state=sdk_state, instruction=instruction)[0]
+                sdk_action = sdk.predict_action_chunk(model_type, images=sdk_images, state=sdk_state, instruction=instruction)[0]
             else:
                 if not sdk_fifo:
-                    sdk_chunk = sdk.predict_action_chunk("smolvla", images=sdk_images, state=sdk_state, instruction=instruction)
+                    sdk_chunk = sdk.predict_action_chunk(model_type, images=sdk_images, state=sdk_state, instruction=instruction)
                     sdk_fifo.extend(np.asarray(item, dtype=np.float32).reshape(-1) for item in sdk_chunk)
                 sdk_action = sdk_fifo.popleft()
             sdk_action_np = np.asarray(sdk_action, dtype=np.float32).reshape(1, -1)
@@ -314,11 +434,16 @@ def main() -> int:
 
     summary = {
         "model": model_label,
+        "model_type": model_type,
         "model_dir": str(model_dir),
         "benchmark": args.benchmark,
         "task_id": args.task_id,
         "execute": args.execute,
         "sdk_selection": args.sdk_selection,
+        "rtc_enabled": args.enable_rtc,
+        "rtc_execution_horizon": args.rtc_execution_horizon,
+        "rtc_inference_delay_steps": args.rtc_inference_delay_steps,
+        "required_cameras": required_cameras,
         "seed": args.seed,
         "steps": steps_taken,
         "success": success,

@@ -4,8 +4,6 @@ Base inference primitives with LeRobot-style action queues.
 Key Features (LeRobot Pattern):
 - Timestamp-aligned action queue (not FIFO)
 - Time-based action selection (skip expired actions)
-- Adaptive chunk threshold based on latency estimation
-- Observation queue maxsize=1 (always use latest frame)
 - Aggregate function for overlapping action chunks
 """
 
@@ -177,11 +175,6 @@ class LatencyEstimator:
         """Get current estimate."""
         with self._lock:
             return self.value
-    
-    def get_steps_during_inference(self, fps: float) -> int:
-        """Calculate how many control steps will pass during one inference."""
-        with self._lock:
-            return int(np.ceil(self.value * fps))
 
 
 # ==================== Action Queue Manager (LeRobot Pattern) ====================
@@ -225,11 +218,6 @@ class TimestampedActionQueue:
         with self._lock:
             return len(self._queue)
     
-    def get_fill_ratio(self) -> float:
-        """Get queue fill ratio relative to chunk size."""
-        with self._lock:
-            return len(self._queue) / max(1, self._chunk_size)
-
     def get_snapshot(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Return a compact snapshot of queued actions for debugging."""
         with self._lock:
@@ -245,27 +233,6 @@ class TimestampedActionQueue:
                     }
                 )
             return entries
-    
-    def should_request_new_chunk(self, latency_estimator: LatencyEstimator) -> bool:
-        """
-        Determine if we should trigger new inference.
-        
-        LeRobot pattern: trigger when queue_size / chunk_size <= threshold
-        BUT also consider: we need enough actions to cover inference latency
-        """
-        with self._lock:
-            queue_size = len(self._queue)
-        
-        # Basic threshold check
-        fill_ratio = queue_size / max(1, self._chunk_size)
-        if fill_ratio > self.config.chunk_size_threshold:
-            return False
-        
-        # Latency-aware check: do we have enough actions to survive inference?
-        steps_during_inference = latency_estimator.get_steps_during_inference(self.config.control_fps)
-        safety_steps = int(steps_during_inference * self.config.latency_safety_margin)
-        
-        return queue_size <= safety_steps
     
     def add_action_chunk(self, timed_actions: List[TimedAction]):
         """

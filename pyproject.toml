@@ -7,33 +7,37 @@ name = "inference-sdk"
 version = "0.1.0"
 description = "Standalone inference SDK for ACT, SmolVLA, PI0, and PI0.5 policy inference."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
-  "numpy",
-  "opencv-python",
-  "PyYAML",
-  "torch",
+  "numpy>=2.0.0,<2.3.0",
+  "opencv-python>=4.10.0,<4.14.0",
+  "PyYAML>=6.0.1,<7.0.0",
+  "torch>=2.2.1,<2.11.0",
 ]
 
 [project.optional-dependencies]
 act = [
-  "omegaconf",
-  "safetensors",
+  "omegaconf>=2.3.0,<2.4.0",
+  "safetensors>=0.5.0,<0.8.0",
 ]
 examples = [
-  "huggingface_hub",
-  "matplotlib",
+  "av>=14.0.0,<16.0.0",
+  "huggingface-hub>=1.0.0,<2.0.0",
+  "matplotlib>=3.8.0,<3.11.0",
 ]
 vla = [
-  "omegaconf",
-  "safetensors",
-  "transformers",
+  "omegaconf>=2.3.0,<2.4.0",
+  "safetensors>=0.5.0,<0.8.0",
+  "transformers>=5.4.0,<5.10.0",
 ]
 all = [
-  "omegaconf",
-  "safetensors",
-  "transformers",
-  "lerobot",
+  "av>=14.0.0,<16.0.0",
+  "omegaconf>=2.3.0,<2.4.0",
+  "safetensors>=0.5.0,<0.8.0",
+  "transformers>=5.4.0,<5.10.0",
+  "lerobot>=0.4.4,<0.5.0",
+  "huggingface-hub>=1.0.0,<2.0.0",
+  "matplotlib>=3.8.0,<3.11.0",
 ]
 
 [tool.setuptools.packages.find]
