@@ -12,8 +12,8 @@ def make_rtc_config(config: SmoothingConfig) -> Any | None:
     if not config.enable_rtc:
         return None
 
-    from sparkmind.lerobot_compat.configs.types import RTCAttentionSchedule
-    from sparkmind.lerobot_compat.policies.rtc.configuration_rtc import RTCConfig
+    from lerobot.configs.types import RTCAttentionSchedule
+    from lerobot.policies.rtc.configuration_rtc import RTCConfig
 
     schedule_name = str(config.rtc_prefix_attention_schedule).strip().upper()
     try:
@@ -38,6 +38,6 @@ def make_rtc_processor(config: SmoothingConfig) -> Any | None:
     if rtc_config is None:
         return None
 
-    from sparkmind.lerobot_compat.policies.rtc.modeling_rtc import RTCProcessor
+    from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 
     return RTCProcessor(rtc_config)

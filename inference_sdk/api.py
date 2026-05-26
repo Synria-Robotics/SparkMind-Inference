@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 
 from .base import BaseInferenceEngine, SmoothingConfig
+from .exceptions import (
+    CheckpointNotFoundError,
+    InferenceRuntimeError,
+    InferenceSDKError,
+    InvalidObservationError,
+    MissingDependencyError,
+    ModelLoadError,
+    UnsupportedCheckpointFormatError,
+)
 from .factory import create_engine, normalize_model_type
 
 
@@ -36,6 +46,7 @@ class PolicyMetadata:
     action_dim: int
     chunk_size: int
     n_action_steps: int
+    stability: str
     requested_device: Optional[str]
     actual_device: Optional[str]
     device_warning: str
@@ -88,7 +99,7 @@ class InferenceSDK:
             if self._checkpoint_dirs.get(model_type) == checkpoint_dir:
                 self._apply_instruction(existing, instruction)
                 return self._metadata_for(existing, checkpoint_dir)
-            raise RuntimeError(
+            raise ModelLoadError(
                 f"{model_type} policy is already loaded from "
                 f"{self._checkpoint_dirs[model_type]}. Use force_reload=True to replace it."
             )
@@ -98,25 +109,40 @@ class InferenceSDK:
             self._checkpoint_dirs.pop(model_type, None)
             existing.unload()
 
-        policy = create_engine(
-            model_type=model_type,
-            device=self.device,
-            smoothing_config=self._new_smoothing_config(),
-            strict_device=self.strict_device,
-        )
+        if not Path(checkpoint_dir).exists():
+            raise CheckpointNotFoundError(f"Checkpoint path does not exist: {checkpoint_dir}")
 
+        policy: BaseInferenceEngine | None = None
         try:
+            policy = create_engine(
+                model_type=model_type,
+                device=self.device,
+                smoothing_config=self._new_smoothing_config(),
+                strict_device=self.strict_device,
+            )
+            valid, validation_error = policy.validate_checkpoint(checkpoint_dir)
+            if not valid:
+                raise UnsupportedCheckpointFormatError(validation_error)
+
             ok, error = policy.load(checkpoint_dir)
             if not ok:
-                raise RuntimeError(f"Failed to load {model_type} policy: {error}")
+                raise _load_error_for_message(model_type, error)
 
             self._apply_instruction(policy, instruction)
-        except Exception:
-            try:
-                policy.unload()
-            except Exception:
-                pass
+        except InferenceSDKError:
+            if policy is not None:
+                try:
+                    policy.unload()
+                except Exception:
+                    pass
             raise
+        except Exception as exc:
+            if policy is not None:
+                try:
+                    policy.unload()
+                except Exception:
+                    pass
+            raise ModelLoadError(f"Failed to load {model_type} policy: {exc}") from exc
 
         self._policies[model_type] = policy
         self._checkpoint_dirs[model_type] = checkpoint_dir
@@ -144,7 +170,12 @@ class InferenceSDK:
             state=state,
             instruction=instruction,
         )
-        return policy.predict_chunk(normalized_images, state_array)
+        try:
+            return policy.predict_chunk(normalized_images, state_array)
+        except InferenceSDKError:
+            raise
+        except Exception as exc:
+            raise InferenceRuntimeError(f"Failed to predict {model_type} action chunk") from exc
 
     def predict_action(
         self,
@@ -173,7 +204,12 @@ class InferenceSDK:
             state=state,
             instruction=instruction,
         )
-        return policy.step(normalized_images, state_array)
+        try:
+            return policy.step(normalized_images, state_array)
+        except InferenceSDKError:
+            raise
+        except Exception as exc:
+            raise InferenceRuntimeError(f"Failed to predict {model_type} action") from exc
 
     def get_policy_metadata(self, algorithm_type: str) -> PolicyMetadata:
         """Return metadata for a loaded policy."""
@@ -204,7 +240,7 @@ class InferenceSDK:
         try:
             return self._policies[model_type]
         except KeyError as exc:
-            raise RuntimeError(
+            raise InferenceRuntimeError(
                 f"{model_type} policy is not loaded. Call load_policy() first."
             ) from exc
 
@@ -247,14 +283,14 @@ class InferenceSDK:
 
         set_instruction = getattr(policy, "set_instruction", None)
         if not callable(set_instruction):
-            raise ValueError(f"{policy.model_type} policy does not support language instructions")
+            raise InferenceRuntimeError(f"{policy.model_type} policy does not support language instructions")
 
         get_instruction = getattr(policy, "get_instruction", None)
         if callable(get_instruction) and get_instruction() == instruction:
             return
 
         if not bool(set_instruction(instruction)):
-            raise RuntimeError(f"Failed to set instruction for {policy.model_type} policy")
+            raise InferenceRuntimeError(f"Failed to set instruction for {policy.model_type} policy")
 
     @staticmethod
     def _metadata_for(policy: BaseInferenceEngine, checkpoint_dir: str) -> PolicyMetadata:
@@ -267,6 +303,7 @@ class InferenceSDK:
             action_dim=int(policy.action_dim),
             chunk_size=int(policy.chunk_size),
             n_action_steps=int(policy.n_action_steps),
+            stability="experimental" if policy.model_type == "pi05" else "stable",
             requested_device=device_status.get("requested_device"),
             actual_device=device_status.get("actual_device"),
             device_warning=device_status.get("device_warning") or "",
@@ -346,11 +383,11 @@ def _coerce_observation(
 ) -> Observation:
     if observation is None:
         if images is None or state is None:
-            raise ValueError("Pass either observation=... or both images=... and state=...")
+            raise InvalidObservationError("Pass either observation=... or both images=... and state=...")
         return Observation(images=images, state=state, instruction=instruction)
 
     if images is not None or state is not None:
-        raise ValueError("Do not mix observation=... with images=... or state=...")
+        raise InvalidObservationError("Do not mix observation=... with images=... or state=...")
 
     if isinstance(observation, Observation):
         obs_instruction = instruction if instruction is not None else observation.instruction
@@ -365,7 +402,7 @@ def _coerce_observation(
             obs_images = observation["images"]
             obs_state = observation["state"]
         except KeyError as exc:
-            raise ValueError("Observation mapping must contain 'images' and 'state'") from exc
+            raise InvalidObservationError("Observation mapping must contain 'images' and 'state'") from exc
         obs_instruction = instruction if instruction is not None else observation.get("instruction")
         return Observation(images=obs_images, state=obs_state, instruction=obs_instruction)
 
@@ -373,20 +410,20 @@ def _coerce_observation(
         obs_images = getattr(observation, "images")
         obs_state = getattr(observation, "state")
     except AttributeError as exc:
-        raise TypeError("Observation must be an Observation, mapping, or object with images/state") from exc
+        raise InvalidObservationError("Observation must be an Observation, mapping, or object with images/state") from exc
     obs_instruction = instruction if instruction is not None else getattr(observation, "instruction", None)
     return Observation(images=obs_images, state=obs_state, instruction=obs_instruction)
 
 
 def _coerce_images(images: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
     if not isinstance(images, Mapping):
-        raise TypeError("images must be a mapping of camera name to numpy array")
+        raise InvalidObservationError("images must be a mapping of camera name to numpy array")
 
     result: Dict[str, np.ndarray] = {}
     for camera, image in images.items():
         image_array = np.asarray(image)
         if image_array.ndim != 3 or image_array.shape[2] != 3:
-            raise ValueError(
+            raise InvalidObservationError(
                 f"Image for camera '{camera}' must have shape (H, W, 3), got {image_array.shape}"
             )
         result[str(camera)] = image_array
@@ -394,9 +431,11 @@ def _coerce_images(images: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
 
 
 def _coerce_state(state: np.ndarray) -> np.ndarray:
+    if state is None:
+        raise InvalidObservationError("state is required")
     state_array = np.asarray(state, dtype=np.float32)
     if state_array.ndim != 1:
-        raise ValueError(f"state must be a 1-D array, got shape {state_array.shape}")
+        raise InvalidObservationError(f"state must be a 1-D array, got shape {state_array.shape}")
     return state_array
 
 
@@ -427,16 +466,28 @@ def _validate_observation(
     required_cameras = tuple(policy.get_required_cameras())
     missing_cameras = [camera for camera in required_cameras if camera not in images]
     if missing_cameras:
-        raise ValueError(
+        raise InvalidObservationError(
             f"Missing required cameras for {policy.model_type}: {missing_cameras}. "
             f"Available cameras: {list(images.keys())}"
         )
 
     if policy.state_dim and state.shape[0] != policy.state_dim:
-        raise ValueError(
+        raise InvalidObservationError(
             f"Invalid state dimension for {policy.model_type}: expected {policy.state_dim}, "
             f"got {state.shape[0]}"
         )
+
+
+def _load_error_for_message(model_type: str, error: str) -> InferenceSDKError:
+    message = f"Failed to load {model_type} policy: {error}"
+    lower_error = error.lower()
+    if "依赖不可用" in error or "missing dependency" in lower_error or "import" in lower_error:
+        return MissingDependencyError(message)
+    if "目录格式不受支持" in error or "unsupported" in lower_error:
+        return UnsupportedCheckpointFormatError(message)
+    if "不存在" in error or "not exist" in lower_error or "no such file" in lower_error:
+        return CheckpointNotFoundError(message)
+    return ModelLoadError(message)
 
 
 __all__ = [

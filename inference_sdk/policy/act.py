@@ -268,7 +268,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
                 ACT_IMPORT_ERROR,
                 min_python=(3, 12),
                 install_hint=(
-                    "如果你使用本地 SparkMind checkout，请用 Python 3.12+ 重建虚拟环境后执行 `uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple`。"
+                    "请先安装本地 SparkMind checkout，例如 `uv pip install -e \"third_party/SparkMind[pi,libero]\" -i https://pypi.tuna.tsinghua.edu.cn/simple`。"
                 ),
             )
         

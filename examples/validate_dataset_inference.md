@@ -24,16 +24,13 @@ source .venv/bin/activate
 安装验证脚本依赖：
 
 ```bash
+mkdir -p third_party
+git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
+uv pip install -e "third_party/SparkMind[pi,libero]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 uv pip install -e ".[all,examples]" -c constraints/validated.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果使用本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind` 并安装：
-
-```bash
-mkdir -p third_party
-git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_party/SparkMind
-uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple
-```
+如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。
 
 预训练模型和数据集可以从 Hugging Face 下载。`--model` 和 `--dataset` 都可以传本地路径或 Hugging Face repo id；传 repo id 时脚本会自动下载并缓存到 `.cache/huggingface/`。
 

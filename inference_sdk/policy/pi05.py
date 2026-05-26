@@ -477,11 +477,11 @@ PI05_IMPORT_ERROR: Exception | None = None
 try:
     from transformers import AutoTokenizer
 
-    from sparkmind.lerobot_compat.configs.types import FeatureType, NormalizationMode, PolicyFeature
-    from sparkmind.lerobot_compat.policies.pi05.configuration_pi05 import PI05Config
-    from sparkmind.lerobot_compat.policies.pi05.modeling_pi05 import PI05Policy
-    from sparkmind.lerobot_compat.policies.pi_common import load_pi_core_model_weights
+    from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
     from sparkmind.learning.VLA.models.pi05_model import PI05Pytorch
+    from sparkmind.learning.VLA.utils.pi_common import load_pi_core_model_weights
 
     PI05_AVAILABLE = True
     logger.info("SparkMind PI05 model loaded successfully")
@@ -611,7 +611,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 "PI05 模型所需的 SparkMind / transformers",
                 PI05_IMPORT_ERROR,
                 min_python=(3, 12),
-                install_hint="如果你使用本地 SparkMind checkout，请用 Python 3.12+ 重建虚拟环境后执行 `uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple`。",
+                install_hint="请先安装本地 SparkMind checkout，例如 `uv pip install -e \"third_party/SparkMind[pi,libero]\" -i https://pypi.tuna.tsinghua.edu.cn/simple`。",
             )
 
         valid, error = self.validate_checkpoint(checkpoint_dir)
@@ -909,7 +909,7 @@ class PI05InferenceEngine(BaseInferenceEngine):
         if not self.smoothing_config.enable_rtc:
             return
         delay = max(0, int(self.smoothing_config.rtc_inference_delay_steps))
-        chunk = actions_chunk.detach()
+        chunk = actions_chunk.detach()[:, :, : self.action_dim]
         self._rtc_prev_chunk_left_over = chunk[:, delay:].clone() if delay else chunk.clone()
 
     def unload(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare SDK inference against an official LeRobot or SparkMind policy path."""
+"""Compare SDK inference against an official LeRobot policy path."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ def _repo_root() -> Path:
 REPO_ROOT = _repo_root()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+EXAMPLES_DIR = REPO_ROOT / "examples"
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(EXAMPLES_DIR))
 
 
 def _ensure_sparkmind_path(repo_root: Path) -> None:
@@ -35,7 +38,8 @@ def _ensure_sparkmind_path(repo_root: Path) -> None:
 
 _ensure_sparkmind_path(REPO_ROOT)
 
-from inference_sdk import InferenceSDK, SUPPORTED_MODEL_TYPES, SmoothingConfig  # noqa: E402
+from inference_sdk import InferenceSDK, SmoothingConfig  # noqa: E402
+from inference_sdk.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
 from validate_dataset_inference import (  # noqa: E402
     _adapt_state_for_sdk,
     _parse_camera_map,
@@ -103,9 +107,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--official-backend",
-        choices=("lerobot", "sparkmind"),
+        choices=("lerobot",),
         default="lerobot",
-        help="Reference implementation. Use sparkmind for the vendored LeRobot 0.5.x PI0/PI0.5 stack.",
+        help="Reference implementation. Uses the external LeRobot package.",
     )
     parser.add_argument("--compare-full-chunk", action="store_true")
     parser.add_argument(
@@ -149,16 +153,19 @@ def _set_seed(seed: int, device: str) -> None:
 
 
 def _official_modules(backend: str):
-    if backend == "sparkmind":
-        from sparkmind.lerobot_compat.configs.policies import PreTrainedConfig
-        from sparkmind.lerobot_compat.configs.types import RTCAttentionSchedule
-        from sparkmind.lerobot_compat.policies.factory import make_policy, make_pre_post_processors
-        from sparkmind.lerobot_compat.policies.rtc.configuration_rtc import RTCConfig
-    else:
-        from lerobot.configs.policies import PreTrainedConfig
-        from lerobot.configs.types import RTCAttentionSchedule
-        from lerobot.policies.factory import make_policy, make_pre_post_processors
-        from lerobot.policies.rtc.configuration_rtc import RTCConfig
+    if backend != "lerobot":
+        raise ValueError(f"Unsupported official backend: {backend}")
+
+    # Import policy config modules so LeRobot's PreTrainedConfig registry knows
+    # about Hub checkpoints with `type=pi0/pi05/smolvla`.
+    import lerobot.policies.pi0.configuration_pi0  # noqa: F401
+    import lerobot.policies.pi05.configuration_pi05  # noqa: F401
+    import lerobot.policies.smolvla.configuration_smolvla  # noqa: F401
+
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.configs.types import RTCAttentionSchedule
+    from lerobot.policies.factory import make_policy, make_pre_post_processors
+    from lerobot.policies.rtc.configuration_rtc import RTCConfig
 
     return PreTrainedConfig, RTCAttentionSchedule, RTCConfig, make_policy, make_pre_post_processors
 

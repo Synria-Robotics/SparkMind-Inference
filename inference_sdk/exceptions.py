@@ -21,6 +21,10 @@ class DeviceUnavailableError(InferenceSDKError):
     """Raised when the requested inference device cannot be used."""
 
 
+class InvalidObservationError(InferenceSDKError):
+    """Raised when observation images, state, or instruction are invalid."""
+
+
 class ModelLoadError(InferenceSDKError):
     """Raised when a model fails to load."""
 
@@ -35,6 +39,7 @@ __all__ = [
     "UnsupportedCheckpointFormatError",
     "MissingDependencyError",
     "DeviceUnavailableError",
+    "InvalidObservationError",
     "ModelLoadError",
     "InferenceRuntimeError",
 ]

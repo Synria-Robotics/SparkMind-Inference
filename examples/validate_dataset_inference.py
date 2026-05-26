@@ -64,11 +64,10 @@ def _ensure_sparkmind_path(repo_root: Path) -> Path:
 SPARKMIND_ROOT = _ensure_sparkmind_path(REPO_ROOT)
 
 from inference_sdk import (
-    SUPPORTED_MODEL_TYPES,
     SmoothingConfig,
     create_engine,
-    normalize_model_type,
 )
+from inference_sdk.factory import SUPPORTED_MODEL_TYPES, normalize_model_type
 
 
 def _load_snapshot_download():
@@ -85,18 +84,13 @@ def _load_snapshot_download():
 
 def _load_dataset_class():
     try:
-        from sparkmind.lerobot_compat.datasets.lerobot_dataset import LeRobotDataset
-    except ImportError:
-        try:
-            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-        except ImportError as exc:
-            raise RuntimeError(
-                "Missing dependency: LeRobotDataset\n"
-                "Install SparkMind or lerobot first, for example:\n"
-                "  uv pip install -e '.[all,examples]' -i https://pypi.tuna.tsinghua.edu.cn/simple\n"
-                "or:\n"
-                "  uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple"
-            ) from exc
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: LeRobotDataset\n"
+            "Install external LeRobot v0.5.1 first, for example:\n"
+            "  python -m pip install 'lerobot @ git+https://github.com/huggingface/lerobot.git@v0.5.1'"
+        ) from exc
     return LeRobotDataset
 
 

@@ -39,7 +39,8 @@ def _ensure_sparkmind_path(repo_root: Path) -> None:
 
 _ensure_sparkmind_path(REPO_ROOT)
 
-from inference_sdk import InferenceSDK, SUPPORTED_MODEL_TYPES, SmoothingConfig  # noqa: E402
+from inference_sdk import InferenceSDK, SmoothingConfig  # noqa: E402
+from inference_sdk.factory import SUPPORTED_MODEL_TYPES  # noqa: E402
 from validate_dataset_inference import _resolve_model_source, _resolve_model_type, _tensor_image_to_bgr_uint8  # noqa: E402
 
 
@@ -155,6 +156,12 @@ def _official_preprocessor_overrides(device: str, rename_map: dict[str, str], of
 
 
 def _load_official_policy(model_dir: Path, env_cfg: Any, device: str, rename_map: dict[str, str], args: argparse.Namespace, model_type: str):
+    # Import policy config modules so LeRobot's PreTrainedConfig registry knows
+    # about Hub checkpoints with `type=pi0/pi05/smolvla`.
+    import lerobot.policies.pi0.configuration_pi0  # noqa: F401
+    import lerobot.policies.pi05.configuration_pi05  # noqa: F401
+    import lerobot.policies.smolvla.configuration_smolvla  # noqa: F401
+
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import make_policy, make_pre_post_processors
 

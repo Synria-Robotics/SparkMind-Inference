@@ -482,11 +482,11 @@ PI0_IMPORT_ERROR: Exception | None = None
 try:
     from transformers import AutoTokenizer
 
-    from sparkmind.lerobot_compat.configs.types import FeatureType, NormalizationMode, PolicyFeature
-    from sparkmind.lerobot_compat.policies.pi0.configuration_pi0 import PI0Config
-    from sparkmind.lerobot_compat.policies.pi0.modeling_pi0 import PI0Policy
-    from sparkmind.lerobot_compat.policies.pi_common import load_pi_core_model_weights
+    from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+    from lerobot.policies.pi0.configuration_pi0 import PI0Config
+    from lerobot.policies.pi0.modeling_pi0 import PI0Policy
     from sparkmind.learning.VLA.models.pi0_model import PI0Pytorch
+    from sparkmind.learning.VLA.utils.pi_common import load_pi_core_model_weights
 
     PI0_AVAILABLE = True
     logger.info("SparkMind PI0 model loaded successfully")
@@ -670,7 +670,7 @@ class PI0InferenceEngine(BaseInferenceEngine):
                 PI0_IMPORT_ERROR,
                 min_python=(3, 12),
                 install_hint=(
-                    "如果你使用本地 SparkMind checkout，请用 Python 3.12+ 重建虚拟环境后执行 `uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple`。"
+                    "请先安装本地 SparkMind checkout，例如 `uv pip install -e \"third_party/SparkMind[pi,libero]\" -i https://pypi.tuna.tsinghua.edu.cn/simple`。"
                 ),
             )
 
@@ -956,7 +956,7 @@ class PI0InferenceEngine(BaseInferenceEngine):
         if not self.smoothing_config.enable_rtc:
             return
         delay = max(0, int(self.smoothing_config.rtc_inference_delay_steps))
-        chunk = actions_chunk.detach()
+        chunk = actions_chunk.detach()[:, :, : self.action_dim]
         self._rtc_prev_chunk_left_over = chunk[:, delay:].clone() if delay else chunk.clone()
 
     def unload(self):

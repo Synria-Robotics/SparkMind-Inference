@@ -4,6 +4,8 @@ from typing import Optional
 
 import torch
 
+from .exceptions import DeviceUnavailableError
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +63,7 @@ def resolve_torch_device(requested_device: Optional[str] = None, strict: bool = 
                     f"请求使用 `{requested}`，但当前只检测到 {device_count} 张 CUDA 设备。"
                 )
                 if strict:
-                    raise RuntimeError(message)
+                    raise DeviceUnavailableError(message)
                 actual = "cuda:0"
                 return DeviceSelection(
                     requested=requested,
@@ -77,7 +79,7 @@ def resolve_torch_device(requested_device: Optional[str] = None, strict: bool = 
             f" torch.cuda.device_count()={device_count}。"
         )
         if strict:
-            raise RuntimeError(message)
+            raise DeviceUnavailableError(message)
 
         if _mps_available():
             actual = "mps"
@@ -93,7 +95,7 @@ def resolve_torch_device(requested_device: Optional[str] = None, strict: bool = 
     if requested == "mps" and not _mps_available():
         message = "请求使用 `mps`，但当前环境 MPS 不可用。"
         if strict:
-            raise RuntimeError(message)
+            raise DeviceUnavailableError(message)
         return DeviceSelection(
             requested=requested,
             actual="cpu",

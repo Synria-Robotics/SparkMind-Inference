@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+from typing import TYPE_CHECKING, Optional
 
-from .base import BaseInferenceEngine, SmoothingConfig
-from .policy import (
-    ACTInferenceEngine,
-    PI0InferenceEngine,
-    PI05InferenceEngine,
-    SmolVLAInferenceEngine,
-)
+from .base import SmoothingConfig
+
+if TYPE_CHECKING:
+    from .base import BaseInferenceEngine
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_MODEL_TYPES = ("act", "smolvla", "pi0", "pi05")
 MODEL_TYPE_ALIASES = {
@@ -46,7 +46,7 @@ def create_engine(
     device: str = "cuda:0",
     smoothing_config: Optional[SmoothingConfig] = None,
     strict_device: bool = False,
-) -> BaseInferenceEngine:
+) -> "BaseInferenceEngine":
     """
     Create an inference engine by model type.
 
@@ -61,24 +61,35 @@ def create_engine(
 
     normalized = normalize_model_type(model_type)
     if normalized == "act":
+        from .policy.act import ACTInferenceEngine
+
         return ACTInferenceEngine(
             device=device,
             smoothing_config=smoothing_config,
             strict_device=strict_device,
         )
     if normalized == "smolvla":
+        _preload_lerobot_for_vla()
+        from .policy.smolvla import SmolVLAInferenceEngine
+
         return SmolVLAInferenceEngine(
             device=device,
             smoothing_config=smoothing_config,
             strict_device=strict_device,
         )
     if normalized == "pi0":
+        _preload_lerobot_for_vla()
+        from .policy.pi0 import PI0InferenceEngine
+
         return PI0InferenceEngine(
             device=device,
             smoothing_config=smoothing_config,
             strict_device=strict_device,
         )
     if normalized == "pi05":
+        _preload_lerobot_for_vla()
+        from .policy.pi05 import PI05InferenceEngine
+
         return PI05InferenceEngine(
             device=device,
             smoothing_config=smoothing_config,
@@ -92,7 +103,7 @@ def create_inference_engine(
     device: str = "cuda:0",
     smoothing_config: Optional[SmoothingConfig] = None,
     strict_device: bool = False,
-) -> BaseInferenceEngine:
+) -> "BaseInferenceEngine":
     """Backward-compatible alias for create_engine()."""
     return create_engine(
         model_type=model_type,
@@ -100,6 +111,22 @@ def create_inference_engine(
         smoothing_config=smoothing_config,
         strict_device=strict_device,
     )
+
+
+def _preload_lerobot_for_vla() -> None:
+    """Import LeRobot before SparkMind VLA modules so policy registries are ready."""
+    try:
+        import lerobot  # noqa: F401
+    except ImportError:
+        return
+    except Exception as exc:
+        logger.warning("Failed to preload installed lerobot package: %s", exc)
+        return
+
+    try:
+        import lerobot.policies.rtc  # noqa: F401
+    except Exception as exc:
+        logger.debug("Failed to preload lerobot RTC policies, continuing: %s", exc)
 
 
 __all__ = [
