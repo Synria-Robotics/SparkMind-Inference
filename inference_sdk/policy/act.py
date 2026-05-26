@@ -4,7 +4,7 @@ ACT (Action Chunking Transformer) Inference Engine.
 Implements action queue based inference following LeRobot pattern:
 - Predicts chunk_size actions at once
 - Maintains action queue for smooth execution
-- Async prefetch and exponential blending
+- Optional synchronous temporal ensembling
 """
 
 import json
@@ -221,7 +221,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
     Implements action queue based inference following LeRobot pattern:
     - Predicts chunk_size actions at once
     - Maintains action queue for smooth execution
-    - Supports async prefetch and exponential blending
+    - Supports synchronous temporal ensembling
     """
     
     def __init__(

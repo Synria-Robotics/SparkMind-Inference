@@ -15,7 +15,6 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Queue, Empty, Full
 from typing import Callable, Dict, List, Optional, Tuple, Any
 
 import numpy as np
@@ -31,7 +30,7 @@ class TraceEvent:
 
 class TraceRecorder:
     """
-    Simple recorder for tracing async inference events.
+    Simple recorder for tracing inference events.
 
     Memory-safe: Limits event history to prevent unbounded growth
     during long-running inference sessions.
@@ -107,22 +106,6 @@ class TimedAction:
         return self.action
 
 
-@dataclass  
-class TimedObservation:
-    """Observation with timestamp for latency tracking."""
-    timestamp: float  # When observation was captured
-    timestep: int     # Sequential step index
-    images: Dict[str, np.ndarray]
-    state: np.ndarray
-    must_go: bool = False  # If True, this observation MUST be processed
-    
-    def get_timestamp(self) -> float:
-        return self.timestamp
-    
-    def get_timestep(self) -> int:
-        return self.timestep
-
-
 @dataclass
 class SmoothingConfig:
     """Configuration for action queueing and smoothing."""
@@ -132,9 +115,6 @@ class SmoothingConfig:
     # Gripper velocity clamping (in raw action space, [0, 1000])
     gripper_max_velocity: float = 200.0
     enable_gripper_clamping: bool = True
-    
-    # Legacy compatibility flag. Async scheduling is owned by AsyncInferenceRuntime.
-    enable_async_inference: bool = False
     
     # Chunk threshold: trigger new inference when queue_size / chunk_size <= threshold
     # This is adaptive based on latency
@@ -149,15 +129,8 @@ class SmoothingConfig:
     # Aggregate function for overlapping chunks
     aggregate_fn_name: str = "latest_only"  # "latest_only", "weighted_average", etc.
     
-    # Observation queue settings (LeRobot uses maxsize=1)
-    obs_queue_maxsize: int = 1
-    
     # Fallback when queue empty
     fallback_mode: str = "repeat"  # "repeat", "hold"
-    
-    # Legacy compatibility flags (not used by direct engine execution)
-    fully_async: bool = False
-    enable_async_prefetch: bool = False
 
     # ACT temporal ensembling. Matches LeRobot's ACT temporal ensemble
     # behavior when enabled by ACTInferenceEngine.select_action().
@@ -462,93 +435,6 @@ class TimestampedActionQueue:
             self._latest_executed_timestep = target_timestep
 
             return action
-
-
-# ==================== Observation Queue (LeRobot Pattern) ====================
-
-class ObservationQueue:
-    """
-    LeRobot-style observation queue with maxsize=1.
-    
-    Key insight: GPU inference is slower than camera capture.
-    If we queue observations, we're always processing stale data.
-    Solution: Only keep the LATEST observation, discard old ones.
-    """
-    
-    def __init__(self, maxsize: int = 1):
-        self._queue: Queue = Queue(maxsize=maxsize)
-        self._lock = threading.Lock()
-    
-    def put(self, obs: TimedObservation) -> bool:
-        """
-        Add observation, discarding old one if queue is full.
-        
-        LeRobot pattern (from policy_server.py _enqueue_observation):
-        If queue is full, pop the old observation to make room.
-        """
-        with self._lock:
-            if self._queue.full():
-                try:
-                    _ = self._queue.get_nowait()
-                    logger.debug("Observation queue full, discarded oldest")
-                except Empty:
-                    pass
-            
-            try:
-                self._queue.put_nowait(obs)
-                return True
-            except Full:
-                return False
-
-    def put_with_drop_info(self, obs: Any) -> Tuple[bool, bool]:
-        """
-        Add observation and report whether an older item was dropped.
-
-        Returns:
-            Tuple of (accepted, dropped_old_observation).
-        """
-        dropped = False
-        with self._lock:
-            if self._queue.full():
-                try:
-                    _ = self._queue.get_nowait()
-                    dropped = True
-                    logger.debug("Observation queue full, discarded oldest")
-                except Empty:
-                    pass
-
-            try:
-                self._queue.put_nowait(obs)
-                return True, dropped
-            except Full:
-                return False, dropped
-    
-    def get(self, timeout: float = 0.1) -> Optional[TimedObservation]:
-        """Get observation with timeout."""
-        try:
-            return self._queue.get(timeout=timeout)
-        except Empty:
-            return None
-    
-    def get_nowait(self) -> Optional[TimedObservation]:
-        """Get observation without blocking."""
-        try:
-            return self._queue.get_nowait()
-        except Empty:
-            return None
-    
-    def empty(self) -> bool:
-        """Check if queue is empty."""
-        return self._queue.empty()
-    
-    def clear(self):
-        """Clear all observations."""
-        with self._lock:
-            while not self._queue.empty():
-                try:
-                    self._queue.get_nowait()
-                except Empty:
-                    break
 
 
 # ==================== Gripper Smoother ====================

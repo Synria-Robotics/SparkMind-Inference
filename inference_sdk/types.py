@@ -1,7 +1,7 @@
 """Public type exports for the inference SDK."""
 
 from .api import Observation, PolicyMetadata
-from .base import ACTTemporalEnsembler, SmoothingConfig, TimedAction, TimedObservation, TraceEvent, TraceRecorder
+from .base import ACTTemporalEnsembler, SmoothingConfig, TimedAction, TraceEvent, TraceRecorder
 from .device import DeviceSelection
 
 __all__ = [
@@ -11,7 +11,6 @@ __all__ = [
     "PolicyMetadata",
     "SmoothingConfig",
     "TimedAction",
-    "TimedObservation",
     "TraceEvent",
     "TraceRecorder",
 ]

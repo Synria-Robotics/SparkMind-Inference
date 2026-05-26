@@ -158,10 +158,10 @@ class InferenceSDK:
         """
         Run one synchronous control-loop step for the selected loaded policy.
 
-        Unlike AsyncInferenceRuntime, this executes on the caller thread and
-        returns exactly one action for the current observation. For ACT, pass a
-        SmoothingConfig with enable_temporal_ensemble=True to use the online
-        synchronous temporal ensemble path.
+        This executes on the caller thread and returns exactly one action for
+        the current observation. For ACT, pass a SmoothingConfig with
+        enable_temporal_ensemble=True to use the online synchronous temporal
+        ensemble path.
 
         Returns:
             Numpy array with shape (action_dim,).

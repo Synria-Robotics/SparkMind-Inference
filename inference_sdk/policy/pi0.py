@@ -7,7 +7,7 @@ language-conditioned robot control.
 Implements action queue based inference:
 - Predicts chunk_size actions at once using flow matching denoising
 - Maintains action queue for smooth execution
-- Async prefetch and gripper smoothing via BaseInferenceEngine
+- Gripper smoothing via BaseInferenceEngine
 """
 
 import json

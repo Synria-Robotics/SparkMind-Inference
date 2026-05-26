@@ -57,10 +57,7 @@ def create_engine(
         strict_device: If True, fail instead of silently falling back
     """
     if smoothing_config is None:
-        smoothing_config = SmoothingConfig(
-            enable_async_inference=False,
-            aggregate_fn_name="latest_only",
-        )
+        smoothing_config = SmoothingConfig(aggregate_fn_name="latest_only")
 
     normalized = normalize_model_type(model_type)
     if normalized == "act":

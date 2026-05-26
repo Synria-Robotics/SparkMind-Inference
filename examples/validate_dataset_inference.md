@@ -2,7 +2,7 @@
 
 ## 作用
 
-`examples/validate_dataset_inference.py` 用来在离线数据集上跑一次 SDK 推理，并把模型输出和数据集里的标注动作做逐帧对比。
+`examples/validate_dataset_inference.py` 用来在 LeRobot / LIBERO 风格数据集上回放 observation，并把 SDK 预测动作和数据集标注动作逐帧对比。
 
 脚本会输出：
 
@@ -10,12 +10,7 @@
 - 每个 episode 的逐帧 CSV
 - 汇总 `summary.json` 和 `summary.csv`
 
-适合用来快速检查：
-
-- 模型能否正常加载
-- 模型输出维度是否和数据集一致
-- 模型在数据集回放上的误差大致有多大
-- `predict_chunk()` 和 `step()` 两条执行路径是否符合预期
+它主要用于确认模型加载、相机映射、图像预处理、state/action 归一化、夹爪尺度和 checkpoint 配置是否正确。
 
 ## 前提条件
 
@@ -26,13 +21,13 @@ cd /home/synria/demo/Inference-SDK
 source .venv/bin/activate
 ```
 
-如果当前环境还没装完整依赖，至少需要保证脚本相关依赖可用，例如：
+安装验证脚本依赖：
 
 ```bash
 uv pip install -e ".[all,examples]" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果你使用本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind` 并额外安装：
+如果使用本地 `SparkMind` checkout，推荐放在仓库内的 `third_party/SparkMind` 并安装：
 
 ```bash
 mkdir -p third_party
@@ -40,66 +35,35 @@ git clone https://github.com/Synria-Robotics/SparkMind.git -b dev_ch_v0.1 third_
 uv pip install -e third_party/SparkMind -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-如果已经进入 `third_party/SparkMind` 目录，也可以执行 `uv pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple`。
+预训练模型和数据集可以从 Hugging Face 下载。`--model` 和 `--dataset` 都可以传本地路径或 Hugging Face repo id；传 repo id 时脚本会自动下载并缓存到 `.cache/huggingface/`。
 
-你还需要准备：
-
-- 一个可加载的导出模型目录，或者 Hugging Face 模型 repo id
-- 一个 LeRobot 格式的数据集根目录，或者 Hugging Face dataset repo id
-
-## 最基本的用法
+如果校园网访问 Hugging Face 需要代理，先设置：
 
 ```bash
-python examples/validate_dataset_inference.py \
-  --model /path/to/model \
-  --model-type act \
-  --dataset /path/to/dataset \
-  --episode 0
+export HTTP_PROXY=http://proxy.cse.cuhk.edu.hk:8000
+export HTTPS_PROXY=http://proxy.cse.cuhk.edu.hk:8000
+export ALL_PROXY=http://proxy.cse.cuhk.edu.hk:8000
 ```
 
-这里的 `--model-type` 现在支持直接指定算法类型：
-
-- `act`
-- `pi0`
-- `pi05`
-- `smolvla`
-
-如果不传 `--model-type`，脚本会尝试从模型目录里的配置自动推断。
-
-`validate_dataset_inference.py` 现在有两种验证模式：
-
-- `raw`
-  脚本每一帧调用一次 `predict_chunk()`，并把返回 `action chunk` 的第一个动作拿来和数据集标注对比。
-- `step`
-  脚本每一帧调用一次 `step()`，验证控制环真实会执行到的动作。
-  异步推理只在这个模式下生效。
-
-默认是 `--execution-mode auto`：
-
-- 没有请求时间集成和异步推理时，自动走 `raw`
-- 传了 `--temporal-ensemble` 或 `--enable-async-inference` 时，自动切到 `step`
-
-如果传了 `--temporal-ensemble`，脚本会开启 SDK 内 ACT engine 的 LeRobot 风格时间集成，并通过 `step()` 验证控制环真实输出。
-
-默认系数是 `0.01`。如果要覆盖它，再额外传：
+也可以先手动下载到本地：
 
 ```bash
---temporal-ensemble-coeff 0.01
+hf download <model_repo_id> --repo-type model --local-dir models/<model_name>
+hf download <dataset_repo_id> --repo-type dataset --local-dir data/lerobot/<dataset_name>
 ```
 
-注意：
+## 验证模式
 
-- `--temporal-ensemble-coeff` 不能单独使用
-- 不传 `--temporal-ensemble` 就代表关闭时间集成
-- `--temporal-ensemble` 只支持 ACT
-- 如果显式指定 `--execution-mode raw`，就不能再传 `--temporal-ensemble`
-- 如果显式指定 `--execution-mode raw`，就不能再传 `--enable-async-inference`
-- 当前 example 中，`--temporal-ensemble` 和 `--enable-async-inference` 不能同时开启
-- `--enable-rtc` 只支持 `smolvla`、`pi0`、`pi05`，不传就保持关闭
+`validate_dataset_inference.py` 有两种同步验证模式：
+
+- `raw`：每帧调用 `engine.predict_chunk()`，比较 `chunk[0]` 和 dataset action。默认模式，最适合验证 inference engine 本身的数值正确性。
+- `step`：每帧调用 `engine.step()`，验证同步控制环实际会执行的动作。适合验证 ACT temporal ensemble 或 SmolVLA/PI0/PI0.5 RTC。
+
+默认 `--execution-mode auto`：开启 `--temporal-ensemble` 时自动走 `step`，其他情况走 `raw`。
 
 ## 常用示例
 
-### 1. 验证一个本地 ACT 模型
+验证一个 ACT 模型：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -110,12 +74,7 @@ python examples/validate_dataset_inference.py \
   --device cuda:0
 ```
 
-说明：
-
-- 这条命令默认会走 `raw` 模式
-- 它验证的是 `predict_chunk()` 的首个动作
-
-### 1.1 验证带时间集成的 ACT 控制环
+验证 ACT 同步时间集成：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -126,12 +85,7 @@ python examples/validate_dataset_inference.py \
   --temporal-ensemble
 ```
 
-说明：
-
-- 因为传了 `--temporal-ensemble`，默认会自动切到 `step` 模式
-- 这时候你看到的曲线会反映 chunk 重叠动作经指数加权后的执行结果
-
-### 1.2 验证 step 控制环
+显式验证同步 `step()` 控制环：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -142,22 +96,7 @@ python examples/validate_dataset_inference.py \
   --execution-mode step
 ```
 
-说明：
-
-- 这条命令会调用底层 engine 的同步 `step()` 队列路径
-- 如需验证进程内异步 runtime，可加 `--enable-async-inference`
-- 异步验证脚本会按 runtime 返回的 `action_timestep` 对齐 dataset target，避免队列动作看起来整体慢一帧
-- 异步验证脚本默认使用 `--playback-mode realtime`，按 dataset FPS 播放；大模型不要用最快速离线循环判断曲线，否则后台推理线程拿不到真实控制周期
-
-```bash
-python examples/validate_dataset_async_inference.py \
-  --model models/ACT_pick_and_place_v2 \
-  --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
-  --episode 0
-```
-
-### 2. 验证一个 PI0 模型
+验证 PI0 / PI0.5 / SmolVLA：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -168,12 +107,7 @@ python examples/validate_dataset_inference.py \
   --instruction "pick up the object"
 ```
 
-说明：
-
-- `PI0`、`PI0.5` 和 `SmolVLA` 可以通过 `--instruction` 显式传入指令。
-- 如果不传，脚本会优先使用数据集样本里的 `task` 字段。
-
-### 2.1 验证开启 RTC 的 PI0 / PI0.5 / SmolVLA
+验证开启 RTC 的 PI0 / PI0.5 / SmolVLA：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -182,49 +116,14 @@ python examples/validate_dataset_inference.py \
   --dataset /path/to/lerobot_dataset \
   --episode 0 \
   --instruction "pick and place" \
+  --execution-mode step \
   --enable-rtc \
   --rtc-prefix-attention-schedule LINEAR \
   --rtc-execution-horizon 10 \
   --rtc-inference-delay-steps 0
 ```
 
-说明：
-
-- `--enable-rtc` 只支持 `smolvla`、`pi0`、`pi05`
-- `--rtc-inference-delay-steps` 是静态控制步延迟，默认 `0`
-
-### 2.2 覆盖 action chunk 参数
-
-```bash
-python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
-  --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
-  --episode 0 \
-  --execution-mode step \
-  --n-action-steps 10
-```
-
-说明：
-
-- `--action-chunk-size` 对应 checkpoint 里的 `chunk_size`，表示模型一次 forward 的动作 horizon。
-- `--n-action-steps` 对应 checkpoint 里的 `n_action_steps`，表示每次推理实际返回多少步动作。
-- `raw` 模式仍然只用返回 chunk 的第一个动作做逐帧对比；`step` 模式会按队列/控制环语义逐步执行。
-- 对已训练好的模型，通常优先只调 `--n-action-steps`。改 `--action-chunk-size` 可能导致模型结构和权重 shape 不匹配。
-- 当前 ACT checkpoint 写的是 `chunk_size=50, n_action_steps=1`；不显式传 `--n-action-steps` 时，SDK 会按真机控制兼容逻辑执行完整 50 步。显式传 `--n-action-steps 1` 时会尊重用户设置。
-- 异步脚本里的 `--temporal-ensemble` 是队列层时间集成，需要 chunk overlap 才明显生效；同步 `step` 路径里的 `--temporal-ensemble` 则走 ACT 原始在线时间集成逻辑。
-
-### 3. 验证全部 episode
-
-```bash
-python examples/validate_dataset_inference.py \
-  --model /path/to/model \
-  --model-type act \
-  --dataset /path/to/dataset \
-  --all-episodes
-```
-
-### 4. 只跑前 50 帧做快速调试
+只跑前 50 帧做快速调试：
 
 ```bash
 python examples/validate_dataset_inference.py \
@@ -237,38 +136,31 @@ python examples/validate_dataset_inference.py \
 
 ## 常用参数
 
-- `--model`：模型目录，或 Hugging Face 模型 repo id
-- `--model-type`：算法类型，支持 `act`、`pi0`、`pi05`、`smolvla`
-- `--dataset`：LeRobot 数据集根目录，或 Hugging Face dataset repo id
-- `--episode`：指定单个 episode
-- `--all-episodes`：验证全部 episode
-- `--device`：推理设备，例如 `cuda:0` 或 `cpu`
-- `--instruction`：语言指令，主要用于 `pi0` / `pi05` / `smolvla`
-- `--execution-mode`：`auto` / `raw` / `step`
-- `--temporal-ensemble`：开启 SDK ACT 时间集成，只支持 `act` + `step`/`auto`
-- `--temporal-ensemble-coeff`：ACT 时间集成系数，默认 `0.01`，必须和 `--temporal-ensemble` 一起使用
-- `--action-chunk-size`：覆盖 checkpoint `chunk_size`，即模型一次 forward 的动作 horizon。通常不建议随意改已训练模型的这个值。
-- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理实际返回的动作数，必须小于等于 `action_chunk_size` / `chunk_size`。
-- `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 开启 RTC
-- `--rtc-prefix-attention-schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`
-- `--rtc-execution-horizon` / `--rtc-inference-delay-steps`：RTC 执行窗口和静态推理延迟步数
-- `--enable-async-inference`：在 `step` 模式下启动异步推理线程
-- `--output-dir`：自定义输出目录
-- `--dataset-gripper-scale`：夹爪值缩放模式，通常保留默认 `auto`
-- `--video-backend`：LeRobotDataset 使用的视频后端，默认 `pyav`
-- `--max-frames`：只处理前 N 帧，便于调试
-- `--playback-mode`：仅异步验证脚本使用，`realtime` 按 FPS sleep，`fast` 只推进模拟 timestep
-- `--debug-threads` / `--force-exit`：仅异步验证脚本使用，用于定位或绕过第三方库残留非 daemon 线程导致的退出阻塞
+- `--model`：模型目录，或 Hugging Face 模型 repo id。
+- `--model-type`：算法类型，支持 `act`、`pi0`、`pi05`、`smolvla`；不传时从模型配置推断。
+- `--dataset`：LeRobot 数据集根目录，或 Hugging Face dataset repo id。
+- `--episode` / `--all-episodes`：指定单个 episode 或验证全部 episode。
+- `--device`：推理设备，例如 `cuda:0` 或 `cpu`。
+- `--instruction`：语言指令，主要用于 `pi0` / `pi05` / `smolvla`；不传时优先使用数据集样本里的 `task` 字段。
+- `--execution-mode`：`auto` / `raw` / `step`。
+- `--temporal-ensemble`：开启 ACT 同步时间集成，只支持 `act` + `step`/`auto`。
+- `--temporal-ensemble-coeff`：ACT 时间集成系数，默认 `0.01`，必须和 `--temporal-ensemble` 一起使用。
+- `--action-chunk-size`：覆盖 checkpoint `chunk_size`，即模型一次 forward 的动作 horizon。
+- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理实际返回的动作数。
+- `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 开启 RTC。
+- `--dataset-gripper-scale`：夹爪值缩放模式，通常保留默认 `auto`。
+- `--video-backend`：LeRobotDataset 使用的视频后端，默认 `pyav`。
+- `--max-frames`：只处理前 N 帧，便于调试。
 
 ## 输出结果
 
-如果不指定 `--output-dir`，结果默认会写到：
+如果不指定 `--output-dir`，结果默认写到：
 
 ```bash
 outputs/validate_dataset_inference/<时间戳>_<模型名>_<数据集名>_<scope>/
 ```
 
-目录结构大致如下：
+目录结构：
 
 ```text
 outputs/validate_dataset_inference/20260422_170000_model_dataset_episode_000/
@@ -280,64 +172,26 @@ outputs/validate_dataset_inference/20260422_170000_model_dataset_episode_000/
 └── summary.json
 ```
 
-其中：
+## 建议排查顺序
 
-- `plots/episode_xxx.png`：每个动作维度的预测曲线和标注曲线
-- `csv/episode_xxx.csv`：每一帧的 target / prediction / abs_error
-- `summary.csv`：所有 episode 的简要统计
-- `summary.json`：更完整的结构化结果
+先跑 `raw` 模式。如果 `raw` 也不对，优先检查 checkpoint、`config.json`、processor stats、模型类型、instruction、相机 key、RGB/BGR 和夹爪尺度。
 
-运行头部和 `summary.json` 里还会额外记录：
+如果 `raw` 正常但 `step` 不对，再检查 `control_fps`、`n_action_steps`、ACT temporal ensemble 或 RTC 参数。
 
-- 请求的执行模式和实际生效的执行模式
-- 是否请求异步推理
-- 运行时最终是否真的启用了异步推理
+## 下一步：仿真闭环
 
-## 常见问题
-
-### 1. 模型类型不匹配
-
-如果你明确知道模型算法类型，建议总是传 `--model-type`，避免配置文件推断错误。
-
-### 2. 动作维度不一致
-
-如果脚本报错提示 `Dataset action dim ... does not match model action dim ...`，说明：
-
-- 模型动作空间和数据集不匹配
-- 或者加载了错误的 checkpoint / 错误的数据集
-
-### 3. 缺少依赖
-
-如果报依赖缺失，通常是环境里缺少脚本依赖，例如：
-
-- `huggingface_hub`
-- `matplotlib`
-- `lerobot`
-- `av`
-
-先补齐依赖后再运行。
-
-## 推荐命令
-
-如果你只是想快速确认链路是否通，优先从这一条开始：
+离线数值验证通过后，用 LeRobot official env wrapper 做任务级 smoke test，并同时记录 official policy action 与 SDK action：
 
 ```bash
-python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
-  --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
-  --episode 0 \
-  --max-frames 20
+python examples/compare_libero_sim_actions.py \
+  --model lerobot/smolvla_libero \
+  --benchmark libero_spatial \
+  --task-id 0 \
+  --max-steps 280 \
+  --device cuda:0 \
+  --execute sdk \
+  --sdk-selection fifo \
+  --save-video
 ```
 
-如果你要专门验证控制环差异，建议直接用：
-
-```bash
-python examples/validate_dataset_inference.py \
-  --model models/ACT_pick_and_place_v2 \
-  --model-type act \
-  --dataset data/lerobot/z18820636149/pick_and_place_data90 \
-  --episode 0 \
-  --execution-mode step \
-  --max-frames 20
-```
+该脚本会输出 success、return、逐步 action diff，并保存 official `env.render()` 同视角视频。SmolVLA 的 LeRobot official 闭环使用 FIFO chunk queue；仿真正确性不要用 wall-clock timestamp queue 判断。

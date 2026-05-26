@@ -49,6 +49,7 @@ HF_DATASETS_CACHE, HF_HUB_CACHE = _ensure_cache_dirs(REPO_ROOT)
 def _ensure_sparkmind_path(repo_root: Path) -> Path:
     candidates = (
         repo_root / "third_party" / "SparkMind",
+        repo_root.parent / "SparkMind",
         repo_root / "SparkMind",
     )
     for sparkmind_root in candidates:
@@ -63,8 +64,6 @@ def _ensure_sparkmind_path(repo_root: Path) -> Path:
 SPARKMIND_ROOT = _ensure_sparkmind_path(REPO_ROOT)
 
 from inference_sdk import (
-    AsyncInferenceConfig,
-    AsyncInferenceRuntime,
     SUPPORTED_MODEL_TYPES,
     SmoothingConfig,
     create_engine,
@@ -200,14 +199,23 @@ def _parse_args() -> argparse.Namespace:
         help="Optional explicit instruction. PI0/PI0.5/SmolVLA otherwise use the dataset task string.",
     )
     parser.add_argument(
+        "--camera-map",
+        action="append",
+        default=None,
+        metavar="POLICY_CAMERA=DATASET_CAMERA",
+        help=(
+            "Map a policy camera role to a dataset camera key/role. "
+            "Example: camera1=image. Can be repeated."
+        ),
+    )
+    parser.add_argument(
         "--execution-mode",
         choices=["auto", "raw", "step"],
         default="auto",
         help=(
             "Validation path. `raw` compares the first action from `predict_chunk()`. "
             "`step` validates control-loop execution via `step()`. "
-            "`auto` uses `step()` when temporal ensembling or async inference is requested; "
-            "otherwise it uses `raw`."
+            "`auto` uses `step()` when temporal ensembling is requested; otherwise it uses `raw`."
         ),
     )
     parser.add_argument(
@@ -274,11 +282,6 @@ def _parse_args() -> argparse.Namespace:
         help="Maximum RTC debug records to keep. Default: 100.",
     )
     parser.add_argument(
-        "--enable-async-inference",
-        action="store_true",
-        help="Validate the control loop through AsyncInferenceRuntime. Effective only in step mode.",
-    )
-    parser.add_argument(
         "--dataset-gripper-scale",
         choices=["auto", "normalized", "raw"],
         default="auto",
@@ -301,6 +304,7 @@ def _parse_args() -> argparse.Namespace:
 @dataclass
 class EngineMetadata:
     required_cameras: list[str]
+    state_dim: int
     action_dim: int
     chunk_size: int
     n_action_steps: int
@@ -522,6 +526,22 @@ def _adapt_state_for_sdk(state: np.ndarray, gripper_mode: str) -> np.ndarray:
     return result
 
 
+def _parse_camera_map(values: list[str] | None) -> dict[str, str]:
+    if not values:
+        return {}
+    result: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"Invalid --camera-map value {value!r}; expected POLICY_CAMERA=DATASET_CAMERA")
+        policy_camera, dataset_camera = value.split("=", 1)
+        policy_camera = policy_camera.strip()
+        dataset_camera = dataset_camera.strip()
+        if not policy_camera or not dataset_camera:
+            raise ValueError(f"Invalid --camera-map value {value!r}; expected POLICY_CAMERA=DATASET_CAMERA")
+        result[policy_camera] = dataset_camera
+    return result
+
+
 def _adapt_prediction_for_dataset(actions: np.ndarray, gripper_mode: str) -> np.ndarray:
     result = np.asarray(actions, dtype=np.float32).copy()
     if result.ndim == 1:
@@ -565,12 +585,18 @@ def _build_observation(
     required_cameras: list[str],
     gripper_mode: str,
     instruction: str | None,
+    camera_map: dict[str, str],
+    state_dim: int,
 ) -> Observation:
     images = {
-        camera: _tensor_image_to_bgr_uint8(item[_resolve_image_key(item, camera)])
+        camera: _tensor_image_to_bgr_uint8(item[_resolve_image_key(item, camera_map.get(camera, camera))])
         for camera in required_cameras
     }
     state = _adapt_state_for_sdk(item["observation.state"].detach().cpu().numpy(), gripper_mode)
+    if state_dim > 0 and state.shape[0] != state_dim:
+        if state.shape[0] < state_dim:
+            raise ValueError(f"Dataset state dim ({state.shape[0]}) is smaller than model state dim ({state_dim})")
+        state = state[:state_dim].copy()
     return Observation(images=images, state=state, instruction=instruction)
 
 
@@ -600,7 +626,7 @@ def _select_episode_ids(args: argparse.Namespace, available_episode_ids: list[in
 def _resolve_execution_mode(args: argparse.Namespace) -> str:
     if args.execution_mode != "auto":
         return args.execution_mode
-    if args.temporal_ensemble or args.enable_async_inference:
+    if args.temporal_ensemble:
         return "step"
     return "raw"
 
@@ -608,7 +634,6 @@ def _resolve_execution_mode(args: argparse.Namespace) -> str:
 def _load_engine(model_type: str, model_dir: Path, args: argparse.Namespace, control_fps: float):
     smoothing_config = SmoothingConfig(
         control_fps=control_fps,
-        enable_async_inference=False,
         aggregate_fn_name="latest_only",
         action_chunk_size=args.action_chunk_size,
         n_action_steps=args.n_action_steps,
@@ -638,45 +663,6 @@ def _load_engine(model_type: str, model_dir: Path, args: argparse.Namespace, con
     return engine
 
 
-def _metadata_from_policy_metadata(metadata: Any) -> EngineMetadata:
-    return EngineMetadata(
-        required_cameras=list(metadata.required_cameras),
-        action_dim=int(metadata.action_dim),
-        chunk_size=int(metadata.chunk_size),
-        n_action_steps=int(metadata.n_action_steps),
-    )
-
-
-def _load_async_runtime(
-    model_type: str,
-    model_dir: Path,
-    args: argparse.Namespace,
-    control_fps: float,
-) -> tuple[AsyncInferenceRuntime, EngineMetadata]:
-    runtime = AsyncInferenceRuntime()
-    metadata = runtime.load_policy(
-        algorithm_type=model_type,
-        checkpoint_dir=str(model_dir),
-        device=args.device,
-        instruction=args.instruction,
-        config=AsyncInferenceConfig(
-            control_fps=control_fps,
-            chunk_size_threshold=0.5,
-            action_chunk_size=args.action_chunk_size,
-            n_action_steps=args.n_action_steps,
-            aggregate_fn_name="weighted_average",
-            enable_rtc=args.enable_rtc,
-            rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
-            rtc_max_guidance_weight=args.rtc_max_guidance_weight,
-            rtc_execution_horizon=args.rtc_execution_horizon,
-            rtc_inference_delay_steps=args.rtc_inference_delay_steps,
-            rtc_debug=args.rtc_debug,
-            rtc_debug_maxlen=args.rtc_debug_maxlen,
-        ),
-    )
-    return runtime, _metadata_from_policy_metadata(metadata)
-
-
 def _configure_instruction(engine: Any, instruction: str | None) -> None:
     if not instruction:
         return
@@ -689,6 +675,7 @@ def _configure_instruction(engine: Any, instruction: str | None) -> None:
 def _get_engine_metadata(engine: Any) -> EngineMetadata:
     return EngineMetadata(
         required_cameras=list(engine.get_required_cameras()),
+        state_dim=int(engine.state_dim),
         action_dim=int(engine.action_dim),
         chunk_size=int(engine.chunk_size),
         n_action_steps=int(engine.n_action_steps),
@@ -798,8 +785,7 @@ def _write_episode_csv(episode_result: EpisodeResult, output_path: Path) -> None
 
 def _run_episode_validation(
     *,
-    engine: Any | None,
-    async_runtime: AsyncInferenceRuntime | None,
+    engine: Any,
     dataset: Any,
     dataset_indices: np.ndarray,
     all_actions: np.ndarray,
@@ -808,6 +794,7 @@ def _run_episode_validation(
     gripper_mode: str,
     explicit_instruction: str | None,
     execution_mode: str,
+    camera_map: dict[str, str],
 ) -> EpisodeResult:
     action_dim = int(metadata.action_dim)
     accumulator = ErrorAccumulator(action_dim=action_dim)
@@ -816,81 +803,52 @@ def _run_episode_validation(
     frame_indices: list[int] = []
     task = ""
     total_call_ms = 0.0
-    async_started = False
 
-    if async_runtime is not None:
-        async_runtime.reset(clear_metrics=False)
-    elif engine is not None:
-        engine.reset()
-    else:
-        raise ValueError("Either engine or async_runtime must be provided")
+    engine.reset()
 
     first_item = dataset[int(dataset_indices[0])]
     episode_instruction = _resolve_instruction(model_type, explicit_instruction, first_item)
-    if engine is not None:
-        _configure_instruction(engine, episode_instruction)
-    try:
-        if async_runtime is not None:
-            first_observation = _build_observation(
-                item=first_item,
-                required_cameras=list(metadata.required_cameras),
-                gripper_mode=gripper_mode,
-                instruction=episode_instruction,
+    _configure_instruction(engine, episode_instruction)
+
+    for position, dataset_index in enumerate(dataset_indices.tolist(), start=1):
+        item = dataset[int(dataset_index)]
+        instruction = _resolve_instruction(model_type, explicit_instruction, item) or episode_instruction
+        observation = _build_observation(
+            item=item,
+            required_cameras=list(metadata.required_cameras),
+            gripper_mode=gripper_mode,
+            instruction=instruction,
+            camera_map=camera_map,
+            state_dim=int(metadata.state_dim),
+        )
+
+        start_time = time.perf_counter()
+        if execution_mode == "step":
+            predicted_first = engine.step(observation.images, observation.state)
+        else:
+            predicted_first = engine.predict_chunk(observation.images, observation.state)[0]
+        total_call_ms += (time.perf_counter() - start_time) * 1000.0
+
+        predicted_first = _adapt_prediction_for_dataset(predicted_first, gripper_mode)[0]
+        target = all_actions[int(dataset_index)]
+        accumulator.update(predicted_first, target)
+
+        predictions.append(predicted_first)
+        targets.append(target)
+
+        frame_value = item["frame_index"]
+        if hasattr(frame_value, "item"):
+            frame_value = frame_value.item()
+        frame_indices.append(int(frame_value))
+        task = str(item.get("task", task))
+
+        if position == 1 or position == len(dataset_indices) or position % 50 == 0:
+            sample_mae = float(np.mean(np.abs(predicted_first - target)))
+            print(
+                f"  frame {position:04d}/{len(dataset_indices):04d} "
+                f"dataset_idx={dataset_index:05d} frame_idx={frame_indices[-1]:04d} "
+                f"mae={sample_mae:.6f}"
             )
-            async_runtime.warmup(
-                images=first_observation.images,
-                state=first_observation.state,
-                instruction=episode_instruction,
-            )
-            async_runtime.start()
-            async_started = True
-
-        for position, dataset_index in enumerate(dataset_indices.tolist(), start=1):
-            item = dataset[int(dataset_index)]
-            instruction = _resolve_instruction(model_type, explicit_instruction, item) or episode_instruction
-            observation = _build_observation(
-                item=item,
-                required_cameras=list(metadata.required_cameras),
-                gripper_mode=gripper_mode,
-                instruction=instruction,
-            )
-
-            start_time = time.perf_counter()
-            if async_runtime is not None:
-                predicted_first = async_runtime.step(
-                    images=observation.images,
-                    state=observation.state,
-                    instruction=instruction,
-                ).action
-            elif execution_mode == "step":
-                predicted_first = engine.step(observation.images, observation.state)
-            else:
-                predicted_first = engine.predict_chunk(observation.images, observation.state)[0]
-            total_call_ms += (time.perf_counter() - start_time) * 1000.0
-
-            predicted_first = _adapt_prediction_for_dataset(predicted_first, gripper_mode)[0]
-            target = all_actions[int(dataset_index)]
-            accumulator.update(predicted_first, target)
-
-            predictions.append(predicted_first)
-            targets.append(target)
-
-            frame_value = item["frame_index"]
-            if hasattr(frame_value, "item"):
-                frame_value = frame_value.item()
-            frame_indices.append(int(frame_value))
-            task = str(item.get("task", task))
-
-            if position == 1 or position == len(dataset_indices) or position % 50 == 0:
-                sample_mae = float(np.mean(np.abs(predicted_first - target)))
-                print(
-                    f"  frame {position:04d}/{len(dataset_indices):04d} "
-                    f"dataset_idx={dataset_index:05d} frame_idx={frame_indices[-1]:04d} "
-                    f"mae={sample_mae:.6f}"
-                )
-    finally:
-        if async_started:
-            async_runtime.stop()
 
     predictions_array = np.asarray(predictions, dtype=np.float32)
     targets_array = np.asarray(targets, dtype=np.float32)
@@ -927,7 +885,6 @@ def _print_run_header(
     device: str,
     requested_execution_mode: str,
     resolved_execution_mode: str,
-    async_inference_enabled: bool,
     temporal_ensemble_coeff: float | None,
     rtc_enabled: bool,
 ) -> None:
@@ -945,7 +902,6 @@ def _print_run_header(
     print(f"Dataset gripper scale: {gripper_mode}")
     print(f"Device: {device}")
     print(f"Execution mode: requested={requested_execution_mode} resolved={resolved_execution_mode}")
-    print(f"Async inference: {'enabled' if async_inference_enabled else 'disabled'}")
     print(f"RTC: {'enabled' if rtc_enabled else 'disabled'}")
     print(
         "Temporal ensembling: "
@@ -1005,12 +961,6 @@ def main() -> int:
     execution_mode = _resolve_execution_mode(args)
     if args.execution_mode == "raw" and args.temporal_ensemble:
         raise ValueError("`--temporal-ensemble` requires `--execution-mode step` or `--execution-mode auto`")
-    if args.execution_mode == "raw" and args.enable_async_inference:
-        raise ValueError(
-            "`--enable-async-inference` requires `--execution-mode step` or `--execution-mode auto`"
-        )
-    if args.temporal_ensemble and args.enable_async_inference:
-        raise ValueError("`--temporal-ensemble` cannot be combined with `--enable-async-inference` in this example")
 
     scope = "all_episodes" if args.all_episodes else f"episode_{args.episode:03d}"
     output_dir = Path(
@@ -1038,6 +988,7 @@ def main() -> int:
         raise ValueError("`--rtc-debug-maxlen` must be >= 1")
 
     dataset_repo_id = _dataset_repo_id_for_source(args.dataset, dataset_root)
+    camera_map = _parse_camera_map(args.camera_map)
 
     LeRobotDataset = _load_dataset_class()
     dataset = LeRobotDataset(
@@ -1052,17 +1003,10 @@ def main() -> int:
     available_episode_ids = sorted(episode_to_indices.keys())
     episode_ids = _select_episode_ids(args, available_episode_ids)
 
-    engine = None
-    async_runtime = None
-    metadata = None
-    if args.enable_async_inference:
-        async_runtime, metadata = _load_async_runtime(model_type, model_dir, args, float(dataset.fps))
-    else:
-        engine = _load_engine(model_type, model_dir, args, float(dataset.fps))
+    engine = _load_engine(model_type, model_dir, args, float(dataset.fps))
 
     try:
-        if metadata is None:
-            metadata = _get_engine_metadata(engine)
+        metadata = _get_engine_metadata(engine)
         if all_actions.shape[1] != metadata.action_dim:
             raise ValueError(
                 f"Dataset action dim ({all_actions.shape[1]}) does not match model action dim ({metadata.action_dim})"
@@ -1082,7 +1026,6 @@ def main() -> int:
             device=args.device,
             requested_execution_mode=args.execution_mode,
             resolved_execution_mode=execution_mode,
-            async_inference_enabled=args.enable_async_inference,
             temporal_ensemble_coeff=temporal_ensemble_coeff,
             rtc_enabled=args.enable_rtc,
         )
@@ -1102,7 +1045,6 @@ def main() -> int:
 
             result = _run_episode_validation(
                 engine=engine,
-                async_runtime=async_runtime,
                 dataset=dataset,
                 dataset_indices=episode_indices,
                 all_actions=all_actions,
@@ -1111,6 +1053,7 @@ def main() -> int:
                 gripper_mode=gripper_mode,
                 explicit_instruction=args.instruction,
                 execution_mode=execution_mode,
+                camera_map=camera_map,
             )
 
             for prediction, target in zip(result.predictions, result.targets, strict=True):
@@ -1140,10 +1083,7 @@ def main() -> int:
             )
             print("-" * 80)
     finally:
-        if async_runtime is not None:
-            async_runtime.close()
-        if engine is not None:
-            engine.unload()
+        engine.unload()
 
     overall_metrics = overall_accumulator.as_dict()
     summary = {
@@ -1155,9 +1095,9 @@ def main() -> int:
         "device": args.device,
         "control_fps": float(dataset.fps),
         "dataset_gripper_scale": gripper_mode,
+        "camera_map": camera_map,
         "requested_execution_mode": args.execution_mode,
         "resolved_execution_mode": execution_mode,
-        "async_inference_enabled": args.enable_async_inference,
         "temporal_ensemble_enabled": args.temporal_ensemble,
         "temporal_ensemble_coeff": temporal_ensemble_coeff,
         "rtc_enabled": args.enable_rtc,

@@ -7,7 +7,7 @@ action expert for robot control. Supports language-conditioned actions.
 Implements action queue based inference:
 - Predicts chunk_size actions at once using Flow Matching
 - Maintains action queue for smooth execution
-- Async prefetch and exponential blending
+- Optional RTC for synchronous control-loop validation
 """
 
 import json
@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterator, Optional, Tuple
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 
 from ..base import BaseInferenceEngine, SmoothingConfig
@@ -164,6 +165,42 @@ def _load_pretrained_smolvla_stats(checkpoint_path: Path) -> Dict[str, Dict[str,
     return stats
 
 
+def _load_pretrained_required_image_features(checkpoint_path: Path) -> list[str]:
+    config_path = checkpoint_path / PREPROCESSOR_CONFIG_FILENAME
+    if not config_path.is_file():
+        return []
+
+    with open(config_path, "r") as f:
+        processor_config = json.load(f)
+
+    image_features: list[str] = []
+    for step in processor_config.get("steps", []):
+        if step.get("registry_name") != "rename_observations_processor":
+            continue
+        rename_map = step.get("config", {}).get("rename_map", {})
+        for target_key in rename_map.values():
+            if isinstance(target_key, str) and target_key.startswith("observation.images."):
+                image_features.append(target_key)
+
+    return image_features
+
+
+def _stats_feature_dim(stats: Optional[Dict[str, Dict[str, Any]]], feature_name: str) -> Optional[int]:
+    if not stats or feature_name not in stats:
+        return None
+
+    feature_stats = stats[feature_name]
+    for stat_name in ("mean", "std", "min", "max"):
+        values = feature_stats.get(stat_name)
+        if values is None:
+            continue
+        if isinstance(values, list):
+            return len(values)
+        if hasattr(values, "shape") and values.shape:
+            return int(values.shape[0])
+    return None
+
+
 def _load_smolvla_state_dict(checkpoint_path: Path, device: torch.device) -> Dict[str, torch.Tensor]:
     safetensors_path = checkpoint_path / "model.safetensors"
     if safetensors_path.is_file():
@@ -296,7 +333,7 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
     Implements action queue based inference:
     - Predicts chunk_size actions at once using Flow Matching
     - Maintains action queue for smooth execution
-    - Async prefetch and exponential blending
+    - Optional RTC for synchronous control-loop validation
     """
     
     def __init__(
@@ -386,6 +423,7 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         vlm_model_source = DEFAULT_SMOLVLM_MODEL
         
         try:
+            required_image_features: list[str] = []
             if _is_legacy_smolvla_checkpoint(checkpoint_path):
                 config_path = checkpoint_path / "inference_config.yaml"
                 with open(config_path, "r") as f:
@@ -401,17 +439,19 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
 
                 self.config_dict = _convert_pretrained_smolvla_config(pretrained_config)
                 self.stats = _load_pretrained_smolvla_stats(checkpoint_path)
+                required_image_features = _load_pretrained_required_image_features(checkpoint_path)
 
             self._apply_action_chunk_overrides(self.config_dict)
             
             # Parse camera requirements from image_features
             image_features = self.config_dict.get("image_features", [])
+            required_features = required_image_features or image_features
             self.required_cameras = []
             self._camera_key_to_role = {}
             self._role_to_camera_key = {}
             self._camera_alias_to_key = {}
             
-            for key in image_features:
+            for key in required_features:
                 if key.startswith("observation.images."):
                     suffix = key.replace("observation.images.", "")
                     if suffix.startswith("cam_"):
@@ -431,6 +471,22 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             action_shape = self.config_dict.get("action_feature", {}).get("shape", [7])
             self.state_dim = state_shape[0] if state_shape else 7
             self.action_dim = action_shape[0] if action_shape else 7
+            stats_state_dim = _stats_feature_dim(self.stats, "observation.state")
+            if stats_state_dim is not None and stats_state_dim != self.state_dim:
+                logger.warning(
+                    "SmolVLA config state dim=%s but processor stats dim=%s; using stats dim",
+                    self.state_dim,
+                    stats_state_dim,
+                )
+                self.state_dim = stats_state_dim
+            stats_action_dim = _stats_feature_dim(self.stats, "action")
+            if stats_action_dim is not None and stats_action_dim != self.action_dim:
+                logger.warning(
+                    "SmolVLA config action dim=%s but processor stats dim=%s; using stats dim",
+                    self.action_dim,
+                    stats_action_dim,
+                )
+                self.action_dim = stats_action_dim
             self.chunk_size = self.config_dict.get("chunk_size", 50)
             self.n_action_steps = self.config_dict.get("n_action_steps", self.chunk_size)
             
@@ -600,6 +656,19 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         padded[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
         
         return padded
+
+    def _resize_tensor_with_pad(self, img: torch.Tensor, target_h: int, target_w: int, pad_value: float = 0.0) -> torch.Tensor:
+        if img.ndim != 4:
+            raise ValueError(f"(b,c,h,w) expected, got {tuple(img.shape)}")
+
+        cur_h, cur_w = img.shape[2:]
+        ratio = max(cur_w / target_w, cur_h / target_h)
+        resized_h = int(cur_h / ratio)
+        resized_w = int(cur_w / ratio)
+        resized = F.interpolate(img, size=(resized_h, resized_w), mode="bilinear", align_corners=False)
+        pad_h = max(0, int(target_h - resized_h))
+        pad_w = max(0, int(target_w - resized_w))
+        return F.pad(resized, (pad_w, 0, pad_h, 0), value=pad_value)
     
     def _preprocess_images(self, images: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
         """
@@ -625,16 +694,15 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             # BGR -> RGB
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
             
-            if self._image_resize is not None:
-                target_h, target_w = self._image_resize
-                img_rgb = self._resize_with_pad(img_rgb, target_h, target_w, pad_value=0)
-            
             # HWC -> CHW, normalize to [0, 1] then to [-1, 1]
             img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).float() / 255.0
+            img_tensor = img_tensor.unsqueeze(0)
+            if self._image_resize is not None:
+                target_h, target_w = self._image_resize
+                img_tensor = self._resize_tensor_with_pad(img_tensor, target_h, target_w, pad_value=0.0)
             img_tensor = img_tensor * 2.0 - 1.0  # [-1, 1] normalization
-            
-            # Add batch dimension
-            img_tensor = img_tensor.unsqueeze(0).to(self.device)
+
+            img_tensor = img_tensor.to(self.device)
             processed[camera_key] = img_tensor
         
         return processed
