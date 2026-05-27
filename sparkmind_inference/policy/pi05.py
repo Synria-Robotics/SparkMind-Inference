@@ -657,6 +657,13 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 if key.startswith("observation.images."):
                     suffix = key.replace("observation.images.", "")
                     role = suffix[4:] if suffix.startswith("cam_") else suffix
+                    if role.startswith("empty_camera"):
+                        self._camera_key_to_role[key] = role
+                        self._role_to_camera_key[role] = key
+                        self._camera_alias_to_key[role] = key
+                        self._camera_alias_to_key[suffix] = key
+                        self._camera_alias_to_key[key] = key
+                        continue
                     if role not in self.required_cameras:
                         self.required_cameras.append(role)
                     self._camera_key_to_role[key] = role
@@ -816,15 +823,14 @@ class PI05InferenceEngine(BaseInferenceEngine):
             state[-1] = state[-1] / 1000.0
 
         state_tensor = torch.from_numpy(state).float()
-        if self._state_action_normalization == "sdk_stats":
-            state_tensor = _apply_feature_normalization(
-                tensor=state_tensor,
-                key="observation.state",
-                feature_type="STATE",
-                config_dict=self.config_dict,
-                stats=self.stats,
-                inverse=False,
-            )
+        state_tensor = _apply_feature_normalization(
+            tensor=state_tensor,
+            key="observation.state",
+            feature_type="STATE",
+            config_dict=self.config_dict,
+            stats=self.stats,
+            inverse=False,
+        )
 
         return state_tensor
 
@@ -837,15 +843,14 @@ class PI05InferenceEngine(BaseInferenceEngine):
 
     def _postprocess_action(self, action_tensor: torch.Tensor) -> np.ndarray:
         action = action_tensor.cpu()
-        if self._state_action_normalization == "sdk_stats":
-            action = _apply_feature_normalization(
-                tensor=action,
-                key="action",
-                feature_type="ACTION",
-                config_dict=self.config_dict,
-                stats=self.stats,
-                inverse=True,
-            )
+        action = _apply_feature_normalization(
+            tensor=action,
+            key="action",
+            feature_type="ACTION",
+            config_dict=self.config_dict,
+            stats=self.stats,
+            inverse=True,
+        )
 
         action = action.numpy()
 

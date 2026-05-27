@@ -859,30 +859,28 @@ class PI0InferenceEngine(BaseInferenceEngine):
             state[-1] = state[-1] / 1000.0
 
         state_tensor = torch.from_numpy(state).float()
-        if self._state_action_normalization == "sdk_stats":
-            state_tensor = _apply_feature_normalization(
-                tensor=state_tensor,
-                key="observation.state",
-                feature_type="STATE",
-                config_dict=self.config_dict,
-                stats=self.stats,
-                inverse=False,
-            )
+        state_tensor = _apply_feature_normalization(
+            tensor=state_tensor,
+            key="observation.state",
+            feature_type="STATE",
+            config_dict=self.config_dict,
+            stats=self.stats,
+            inverse=False,
+        )
 
         return state_tensor.unsqueeze(0).to(self.device)
 
     def _postprocess_action(self, action_tensor: torch.Tensor) -> np.ndarray:
         """Postprocess PI0 normalized action tensor back to robot action space."""
         action = action_tensor.cpu()
-        if self._state_action_normalization == "sdk_stats":
-            action = _apply_feature_normalization(
-                tensor=action,
-                key="action",
-                feature_type="ACTION",
-                config_dict=self.config_dict,
-                stats=self.stats,
-                inverse=True,
-            )
+        action = _apply_feature_normalization(
+            tensor=action,
+            key="action",
+            feature_type="ACTION",
+            config_dict=self.config_dict,
+            stats=self.stats,
+            inverse=True,
+        )
 
         action = action.numpy()
 
