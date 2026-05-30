@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkmind-inference"
-version = "1.0.0rc3"
+version = "1.0.0rc4"
 description = "Standalone inference SDK for ACT, SmolVLA, PI0, and PI0.5 policy inference."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"

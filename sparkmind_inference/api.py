@@ -217,6 +217,11 @@ class InferenceSDK:
         policy = self._get_policy(model_type)
         return self._metadata_for(policy, self._checkpoint_dirs[model_type])
 
+    def reset_policy(self, algorithm_type: str) -> None:
+        """Reset one loaded policy's action queue and recurrent inference state."""
+        model_type = normalize_model_type(algorithm_type)
+        self._get_policy(model_type).reset()
+
     def unload_policy(self, algorithm_type: str) -> None:
         """Unload one cached policy."""
         model_type = normalize_model_type(algorithm_type)

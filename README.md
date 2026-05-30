@@ -38,7 +38,7 @@ uv pip install -e "third_party/SparkMind[pi,libero]"
 uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
-如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc3 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc2`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
+如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc4 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc2`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
 
 可选依赖：
 
@@ -79,11 +79,12 @@ hf download <dataset_repo_id> --repo-type dataset --local-dir data/lerobot/<data
 ## Public API Contract
 
 - 主入口从顶层导入：`InferenceSDK`、`Observation`、`SmoothingConfig`、`create_engine`、`predict_action_chunk`、`predict_action` 和 SDK 自定义异常。
+- `InferenceSDK.reset_policy()` 可在新 episode 开始时清空单个 policy 的 FIFO 队列、ACT temporal ensemble 状态和 RTC leftover。
 - `images` 使用相机角色名作为 key，例如 `head`、`wrist`；可用角色以 `metadata.required_cameras` 为准。
 - 每张图像应是 BGR 格式的 `numpy.ndarray`，形状为 `(H, W, 3)`。
 - `state` 应是一维 `numpy.ndarray`，维度需要和模型 `observation.state` 一致。
 - ACT、SmolVLA、PI0 和 PI0.5 作为已验证推理路径；PI0.5 可通过 `algorithm_type="pi05"` 使用。
-- SDK 对外按 robot-space 处理夹爪，输入/输出最后一维夹爪通常是 `[0, 1000]`。
+- SDK 对外按 robot-space 处理夹爪，7 维 Alicia-M 类模型的最后一维夹爪通常是 `[0, 1000]`；ALOHA ACT 这类 14 维 action/state 不会套用 7 维夹爪缩放。
 - `predict_action_chunk()` 和 `predict_action()` 都在调用线程同步执行，不启动后台推理线程。
 - `load_policy()`、observation 校验和推理错误会抛出 SDK 自定义异常，方便上位机按错误类型处理。
 - LeRobot dataset 里的夹爪如果是归一化 `[0, 1]`，验证脚本会通过 `--dataset-gripper-scale auto` 自动适配。
@@ -125,6 +126,8 @@ with InferenceSDK(
         control_fps=30.0,
         enable_temporal_ensemble=True,
         temporal_ensemble_coeff=0.01,
+        n_action_steps=1,
+        enable_gripper_clamping=False,
     ),
 ) as sdk:
     metadata = sdk.load_policy(
@@ -139,6 +142,10 @@ with InferenceSDK(
 ```
 
 PI0.5 可使用 `algorithm_type="pi05"`，`"pi0.5"` / `"pi0_5"` / `"pi0-5"` 也会自动归一到 `pi05`。
+
+### 控制环使用指南
+
+ACT checkpoint 目录、ACT temporal ensemble、PI0 / PI0.5 非 RTC FIFO、PI0 / PI0.5 RTC chunk queue 等完整控制环示例见 [docs/inference_usage.md](docs/inference_usage.md)。
 
 如果只需要执行一次推理，也可以使用一次性 API：
 
@@ -204,6 +211,7 @@ engine = create_engine(
     smoothing_config=SmoothingConfig(
         enable_temporal_ensemble=True,
         temporal_ensemble_coeff=0.01,
+        n_action_steps=1,
     ),
 )
 ```

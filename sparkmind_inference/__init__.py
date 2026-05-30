@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 logger = logging.getLogger(__name__)
-__version__ = "1.0.0rc3"
+__version__ = "1.0.0rc4"
 
 from .exceptions import (  # noqa: E402
     CheckpointNotFoundError,
