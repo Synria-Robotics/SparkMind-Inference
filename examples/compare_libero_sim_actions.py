@@ -97,7 +97,7 @@ def _parse_args() -> argparse.Namespace:
         "--sdk-selection",
         choices=("step", "fifo", "raw"),
         default="step",
-        help="SDK action selection path: timestamped step(), LeRobot-style FIFO chunk queue, or chunk[0] every frame.",
+        help="SDK action selection path: SDK FIFO step(), explicit FIFO chunk queue, or chunk[0] every frame.",
     )
     parser.add_argument("--enable-rtc", action="store_true")
     parser.add_argument("--rtc-execution-horizon", type=int, default=10)
@@ -288,6 +288,8 @@ def main() -> int:
     args = _parse_args()
     model_dir, model_label = _resolve_model_source(args.model)
     model_type = _resolve_model_type(args.model_type, model_dir)
+    if args.enable_rtc and args.sdk_selection == "step":
+        raise ValueError("--enable-rtc is not supported with --sdk-selection step; use fifo/raw chunk selection")
     output_dir = Path(args.output_dir or _default_output_dir(args.model, args.benchmark, args.task_id)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "action_comparison.csv"

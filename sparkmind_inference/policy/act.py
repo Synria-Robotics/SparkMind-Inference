@@ -336,23 +336,6 @@ class ACTInferenceEngine(BaseInferenceEngine):
             self.chunk_size = config_dict.get("chunk_size", 100)
             self.loaded_n_action_steps = int(config_dict.get("n_action_steps", self.chunk_size))
             self.n_action_steps = self.loaded_n_action_steps
-
-            # ACT real-robot rollouts in this codebase historically execute the full predicted
-            # chunk over multiple control steps. Exported LeRobot configs commonly set
-            # n_action_steps=1 for their policy wrapper API, but using only one step here
-            # makes the queue degenerate and causes frequent fallback/re-query on real robots.
-            if (
-                self.smoothing_config.n_action_steps is None
-                and self.chunk_size > 1
-                and self.n_action_steps <= 1
-            ):
-                logger.warning(
-                    "ACT checkpoint reports n_action_steps=%s with chunk_size=%s; "
-                    "overriding execution to consume the full chunk for real-robot control.",
-                    self.loaded_n_action_steps,
-                    self.chunk_size,
-                )
-                self.n_action_steps = self.chunk_size
             
             # Initialize model
             self.model = ACTModel(self.config)
@@ -380,7 +363,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
             if self.smoothing_config.enable_temporal_ensemble:
                 self._temporal_ensembler = ACTTemporalEnsembler(
                     temporal_ensemble_coeff=self.smoothing_config.temporal_ensemble_coeff,
-                    chunk_size=self.n_action_steps,
+                    chunk_size=self.chunk_size,
                 )
             self.reset()
             
@@ -451,7 +434,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
         state = state.copy()  # Don't modify original
         
         # Exported checkpoints may store gripper stats in [0, 1] or robot-space.
-        if len(state) >= 7 and self._state_gripper_stats_unit_scaled:
+        if len(state) == 7 and self._state_gripper_stats_unit_scaled:
             state[-1] = state[-1] / 1000.0
         
         state_tensor = torch.from_numpy(state).float()
@@ -487,7 +470,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
         action = action.numpy()
         
         # Return robot-space actions. Only scale when checkpoint stats are unit gripper values.
-        if len(action) >= 7 and self._action_gripper_stats_unit_scaled:
+        if len(action) == 7 and self._action_gripper_stats_unit_scaled:
             action[-1] = action[-1] * 1000.0
         
         return action
@@ -527,8 +510,9 @@ class ACTInferenceEngine(BaseInferenceEngine):
         # ACTModel returns: (actions, (mu, log_sigma_x2))
         actions_chunk, _ = self.model(batch)  # (1, chunk_size, action_dim)
         
-        # Take n_action_steps actions
-        actions_normalized = actions_chunk[0, :self.n_action_steps]  # (n_action_steps, action_dim)
+        # Return the full model chunk. select_action()/step() decides how many
+        # steps to execute, matching LeRobot's predict_action_chunk/select_action split.
+        actions_normalized = actions_chunk[0, :self.chunk_size]  # (chunk_size, action_dim)
         
         # Postprocess all actions
         actions = np.stack([
@@ -548,12 +532,8 @@ class ACTInferenceEngine(BaseInferenceEngine):
         if self._temporal_ensembler is None:
             self._temporal_ensembler = ACTTemporalEnsembler(
                 temporal_ensemble_coeff=self.smoothing_config.temporal_ensemble_coeff,
-                chunk_size=self.n_action_steps,
+                chunk_size=self.chunk_size,
             )
-
-        current_time = time.time()
-        elapsed_since_reset = max(0.0, current_time - self._episode_start_time)
-        self._current_timestep = int(elapsed_since_reset / self.smoothing_config.environment_dt)
 
         start_time = time.perf_counter()
         action_chunk = self._predict_chunk(images, state)

@@ -143,8 +143,8 @@ python examples/validate_dataset_inference.py \
 - `--temporal-ensemble`：开启 ACT 同步时间集成，只支持 `act` + `step`/`auto`。
 - `--temporal-ensemble-coeff`：ACT 时间集成系数，默认 `0.01`，必须和 `--temporal-ensemble` 一起使用。
 - `--action-chunk-size`：覆盖 checkpoint `chunk_size`，即模型一次 forward 的动作 horizon。
-- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理实际返回的动作数。
-- `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 开启 RTC。
+- `--n-action-steps`：覆盖 checkpoint `n_action_steps`，即每次推理进入 FIFO 队列并执行的动作数。
+- `--enable-rtc`：为 `smolvla` / `pi0` / `pi05` 的 raw/chunk 验证开启 RTC；`step` 模式不支持 RTC。
 - `--dataset-gripper-scale`：夹爪值缩放模式，通常保留默认 `auto`。
 - `--video-backend`：LeRobotDataset 使用的视频后端，默认 `pyav`。
 - `--max-frames`：只处理前 N 帧，便于调试。
@@ -191,4 +191,4 @@ python examples/compare_libero_sim_actions.py \
   --save-video
 ```
 
-该脚本会输出 success、return、逐步 action diff，并保存 official `env.render()` 同视角视频。SmolVLA 的 LeRobot official 闭环使用 FIFO chunk queue；仿真正确性不要用 wall-clock timestamp queue 判断。
+该脚本会输出 success、return、逐步 action diff，并保存 official `env.render()` 同视角视频。SDK step 和 SmolVLA 的 LeRobot official 闭环都使用 FIFO chunk queue；仿真正确性不要用 wall-clock timestamp queue 判断。

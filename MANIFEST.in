@@ -3,3 +3,4 @@ include README.md
 include constraints/*.txt
 include examples/*.py
 include examples/*.md
+include tests/*.py

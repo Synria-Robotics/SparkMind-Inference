@@ -788,7 +788,6 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             **self._rtc_kwargs(),
         )  # (1, chunk_size, max_action_dim)
         
-        # Take n_action_steps actions, only action_dim dimensions
         self._update_rtc_left_over(actions_chunk)
         actions_normalized = actions_chunk[0, :self.n_action_steps, :self.action_dim]
         

@@ -199,7 +199,10 @@ def _apply_processor_normalization_mapping(checkpoint_path: Path, config_dict: D
             registry_name = str(step.get("registry_name", ""))
             if "normalizer" not in registry_name:
                 continue
-            norm_map = (step.get("config") or {}).get("norm_map")
+            step_config = step.get("config") or {}
+            if not step_config.get("features"):
+                continue
+            norm_map = step_config.get("norm_map")
             if norm_map:
                 config_dict["normalization_mapping"] = norm_map
                 return

@@ -209,7 +209,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enable-rtc",
         action="store_true",
-        help="Enable RTC. Only valid for SmolVLA, PI0 and PI0.5 policies.",
+        help="Deprecated for this synchronous predict_action() loop. RTC requires an external chunk action queue.",
     )
     parser.add_argument("--port", default="", help="Alicia-M serial port. Empty means SDK auto-discovery.")
     parser.add_argument(
@@ -258,8 +258,8 @@ def main() -> None:
     args = parse_args()
     if args.temporal_ensemble and args.model_type != "act":
         raise ValueError("--temporal-ensemble is only supported for ACT")
-    if args.enable_rtc and args.model_type not in {"smolvla", "pi0", "pi05"}:
-        raise ValueError("--enable-rtc is only supported for SmolVLA, PI0 and PI0.5")
+    if args.enable_rtc:
+        raise ValueError("--enable-rtc is not supported by this predict_action() loop; use chunk inference with an RTC-aware queue")
 
     robot: Any | None = None
     camera_reader: OpenCVCameraReader | None = None

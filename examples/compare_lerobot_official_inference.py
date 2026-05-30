@@ -261,7 +261,7 @@ def _sdk_predict_chunk(
         for camera in required_cameras
     }
     state = _adapt_state_for_sdk(item["observation.state"].detach().cpu().numpy(), gripper_mode)
-    instruction = str(item["task"])
+    instruction = None if model_type == "act" else str(item["task"])
     _set_seed(seed, device)
     chunk = sdk.predict_action_chunk(model_type, images=images, state=state, instruction=instruction)
     chunk = np.asarray(chunk, dtype=np.float32).copy()

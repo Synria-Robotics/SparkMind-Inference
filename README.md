@@ -114,7 +114,7 @@ with InferenceSDK(device="cuda:0") as sdk:
     print(action_chunk.shape)  # (metadata.n_action_steps, metadata.action_dim)
 ```
 
-真机控制可以使用同步单步 `predict_action()`。这会在调用线程内执行 `engine.step()` 并直接返回当前 tick 的一个 action；ACT 可配合同步时间集成提升控制输出稳定性：
+真机控制可以使用同步单步 `predict_action()`。这会在调用线程内执行 LeRobot v0.5.1 风格 FIFO `engine.step()` 并直接返回当前 tick 的一个 action；ACT 可配合同步时间集成提升控制输出稳定性：
 
 ```python
 from sparkmind_inference import InferenceSDK, Observation, SmoothingConfig
@@ -223,16 +223,15 @@ engine = create_engine(
 )
 ```
 
-说明：ACT 时间集成当前用于同步 `engine.step()` / `select_action()`；SmolVLA、PI0 和 PI0.5 的 RTC 也在同步推理路径中生效。
+说明：ACT 时间集成当前用于同步 `engine.step()` / `select_action()`；SmolVLA、PI0 和 PI0.5 的 RTC 只用于 `predict_action_chunk()`。开启 RTC 后不要调用 `predict_action()` / `engine.step()`，需要在上层使用 RTC-aware action queue。
 
 ## 同步参数
 
-- `control_fps`：控制频率；同步 `step()` 会据此计算动作队列时间步。
+- `control_fps`：控制频率，供上层控制环记录和调度；SDK 内部 `step()` 不再按 wall-clock 跳过动作。
 - `action_chunk_size`：可选，覆盖 checkpoint 里的 `chunk_size`，表示模型一次 forward 的动作 horizon。
-- `n_action_steps`：可选，覆盖 checkpoint 里的 `n_action_steps`，表示每次推理实际返回并进入动作队列的动作数，必须 `<= action_chunk_size/chunk_size`。
-- `aggregate_fn_name`：同步 `step()` 内部动作队列出现重叠 timestep 时的融合方式，支持 `latest_only`、`weighted_average`、`average`、`conservative`。
-- `fallback_mode`：同步动作队列为空时的行为；`hold` 使用当前 robot state，`repeat` 重复上一条动作。
-- `enable_gripper_clamping`：是否对夹爪动作做速度限制，真机可开启，离线曲线对比时可关闭。
+- `n_action_steps`：可选，覆盖 checkpoint 里的 `n_action_steps`，表示每次推理进入 FIFO 队列并执行的动作数，必须 `<= action_chunk_size/chunk_size`。
+- `aggregate_fn_name` / `fallback_mode`：历史 timestamp queue 参数，LeRobot-aligned 默认 `step()` 路径不使用。
+- `enable_gripper_clamping`：是否对夹爪动作做速度限制；默认关闭，避免改变官方 policy 输出。
 - `enable_temporal_ensemble`：为 ACT 的同步 `step()` 开启在线时间集成。
 - `enable_rtc`：为 SmolVLA / PI0 / PI0.5 开启 RTC。
 - `rtc_prefix_attention_schedule`：RTC 前缀注意力权重，支持 `ZEROS`、`ONES`、`LINEAR`、`EXP`。
@@ -278,7 +277,7 @@ python examples/alicia_m_sync_runtime.py \
   --temporal-ensemble
 ```
 
-`act` 可加 `--temporal-ensemble`，`smolvla` / `pi0` / `pi05` 可加 `--enable-rtc`。
+`act` 可加 `--temporal-ensemble`。`predict_action()` 真机路径不支持 `--enable-rtc`；SmolVLA / PI0 / PI0.5 的 RTC 需要使用 chunk 推理和上层 RTC-aware action queue。
 
 ## Dataset 验证
 
@@ -358,7 +357,7 @@ python examples/compare_libero_sim_actions.py \
   --save-video
 ```
 
-该脚本会保存 `action_comparison.csv`、`summary.json` 和 `rollout_render.mp4`。SmolVLA official eval 使用 FIFO chunk queue；不要用 wall-clock timestamp queue 判断 LIBERO 仿真正确性。
+该脚本会保存 `action_comparison.csv`、`summary.json` 和 `rollout_render.mp4`。SDK `step()` 和 SmolVLA official eval 都使用 FIFO chunk queue；不要用 wall-clock timestamp queue 判断 LIBERO 仿真正确性。
 
 ## 常见问题
 

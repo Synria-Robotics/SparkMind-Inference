@@ -2,9 +2,9 @@
 Base inference primitives with LeRobot-style action queues.
 
 Key Features (LeRobot Pattern):
-- Timestamp-aligned action queue (not FIFO)
-- Time-based action selection (skip expired actions)
-- Aggregate function for overlapping action chunks
+- FIFO action queue for select_action()/step()
+- Optional direct action chunk prediction
+- Optional ACT temporal ensembling
 """
 
 import logging
@@ -88,8 +88,8 @@ def get_aggregate_function(name: str) -> Callable[[np.ndarray, np.ndarray], np.n
 
 @dataclass
 class TimedAction:
-    """Action with timestamp for time-aligned execution."""
-    timestamp: float  # Absolute time when this action should be executed
+    """Action with an execution index for the internal FIFO queue."""
+    timestamp: float  # Legacy debug field; default step path does not use wall-clock scheduling
     timestep: int     # Sequential step index
     action: np.ndarray
     ensemble_count: int = 1
@@ -112,10 +112,10 @@ class SmoothingConfig:
     
     # Gripper velocity clamping (in raw action space, [0, 1000])
     gripper_max_velocity: float = 200.0
-    enable_gripper_clamping: bool = True
+    enable_gripper_clamping: bool = False
     
-    # Chunk threshold: trigger new inference when queue_size / chunk_size <= threshold
-    # This is adaptive based on latency
+    # Legacy timestamp-queue knobs. The default step path follows LeRobot v0.5.1
+    # FIFO select_action() semantics and does not use these values.
     chunk_size_threshold: float = 0.5
     action_chunk_size: Optional[int] = None
     n_action_steps: Optional[int] = None
@@ -181,7 +181,11 @@ class LatencyEstimator:
 
 class TimestampedActionQueue:
     """
-    LeRobot-style action queue with timestamp alignment.
+    Legacy indexed action queue.
+
+    The default step/select_action path uses get_next_action(), which behaves
+    like LeRobot v0.5.1 FIFO select_action(). Timestamp-based retrieval remains
+    only for internal/backward-compatible debugging helpers.
 
     Key differences from simple deque:
     1. Actions are indexed by timestep, not FIFO order
@@ -502,9 +506,9 @@ class BaseInferenceEngine(ABC):
     Abstract base class for inference policies with LeRobot-style queue support.
     
     Key Features:
-    - Timestamp-aligned action queue
-    - Latency-adaptive chunk threshold
-    - Gripper velocity clamping
+    - LeRobot v0.5.1 FIFO action queue
+    - Direct action chunk prediction
+    - Optional gripper velocity clamping for deployment adapters
     """
     
     def __init__(self, smoothing_config: Optional[SmoothingConfig] = None):
@@ -628,24 +632,24 @@ class BaseInferenceEngine(ABC):
 
     def select_action(self, images: Dict[str, np.ndarray], state: np.ndarray) -> np.ndarray:
         """
-        Select action with LeRobot-style timestamp alignment.
+        Select action with LeRobot v0.5.1 FIFO queue semantics.
         
         Flow:
-        1. Get action from queue using timestamp alignment.
-        2. If the queue is empty, run synchronous chunk inference and enqueue it.
-        3. Apply fallback and gripper smoothing.
+        1. Pop the next queued action.
+        2. If the queue is empty, run synchronous chunk inference and enqueue
+           the first n_action_steps actions.
+        3. Return exactly one action. Wall-clock time never skips queued actions.
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded")
-        
-        current_time = time.time()
-        
-        # Sync timestep with wall clock to handle loop lag
-        # If loop is slower than control_fps, we need to skip timesteps to stay aligned
-        elapsed = max(0.0, current_time - self._episode_start_time)
-        self._current_timestep = int(elapsed / self.smoothing_config.environment_dt)
-        
-        timed_action = self._action_queue.get_action_for_time(current_time, self._episode_start_time)
+
+        if self.smoothing_config.enable_rtc:
+            raise RuntimeError(
+                "RTC is not supported for step()/predict_action(). "
+                "Use predict_action_chunk() and an RTC-aware external action queue instead."
+            )
+
+        timed_action = self._action_queue.get_next_action()
         if timed_action is None:
             if self._trace_recorder:
                 self._trace_recorder.record("Engine", "Queue Empty", timestep=self._current_timestep)
@@ -656,34 +660,31 @@ class BaseInferenceEngine(ABC):
 
             self._latency_estimator.update(elapsed)
 
+            action_chunk = np.asarray(action_chunk, dtype=np.float32)
+            action_chunk = action_chunk[: max(1, int(self.n_action_steps))]
             timed_actions = [
                 TimedAction(
-                    timestamp=current_time + i * self.smoothing_config.environment_dt,
+                    timestamp=0.0,
                     timestep=self._current_timestep + i,
                     action=action_chunk[i]
                 )
                 for i in range(len(action_chunk))
             ]
             self._action_queue.add_action_chunk(timed_actions)
-            timed_action = self._action_queue.get_action_for_time(current_time, self._episode_start_time)
+            timed_action = self._action_queue.get_next_action()
 
             logger.debug(f"Sync inference: {elapsed*1000:.1f}ms")
-        
-        # Handle empty queue (fallback)
+
         if timed_action is None:
-            action = self._get_fallback_action(state)
-            self._fallback_count += 1
-            logger.debug(f"Using fallback action (count={self._fallback_count})")
-        else:
-            action = timed_action.get_action()
+            raise RuntimeError("Policy returned an empty action chunk")
+
+        action = timed_action.get_action()
+        self._current_timestep = timed_action.get_timestep() + 1
         
         # Apply gripper smoothing
         if self._gripper_smoother is not None:
             action = self._gripper_smoother.smooth(action)
-        
-        # Timestep is updated at start of method based on wall clock
-        # self._current_timestep += 1
-        
+
         return action
     
     def _get_fallback_action(self, state: np.ndarray) -> np.ndarray:

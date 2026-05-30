@@ -972,6 +972,8 @@ def main() -> int:
         raise ValueError("`--temporal-ensemble` is only supported for ACT")
     if args.enable_rtc and model_type not in {"smolvla", "pi0", "pi05"}:
         raise ValueError("`--enable-rtc` is only supported for SmolVLA, PI0 and PI0.5")
+    if args.enable_rtc and execution_mode == "step":
+        raise ValueError("`--enable-rtc` is only supported with raw/chunk validation; step() does not support RTC")
     if args.rtc_max_guidance_weight <= 0.0:
         raise ValueError("`--rtc-max-guidance-weight` must be > 0")
     if args.rtc_execution_horizon < 1:
