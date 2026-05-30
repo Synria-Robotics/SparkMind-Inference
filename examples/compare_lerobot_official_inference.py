@@ -113,6 +113,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--compare-full-chunk", action="store_true")
     parser.add_argument(
+        "--temporal-ensemble",
+        action="store_true",
+        help="Compare ACT select_action()/predict_action() with LeRobot temporal ensembling enabled.",
+    )
+    parser.add_argument("--temporal-ensemble-coeff", type=float, default=0.01)
+    parser.add_argument(
         "--preserve-policy-state",
         action="store_true",
         help="Keep policy queues across frames. By default each frame is compared as an independent forward pass.",
@@ -201,6 +207,9 @@ def _load_official_stack(model_dir: Path, dataset: Any, device: str, rename_map:
     pretrained_path = str(model_dir)
     cfg.pretrained_path = pretrained_path
     cfg.rtc_config = _make_official_rtc_config(args, args.official_backend)
+    if model_type == "act" and args.temporal_ensemble:
+        cfg.temporal_ensemble_coeff = float(args.temporal_ensemble_coeff)
+        cfg.n_action_steps = 1
 
     policy = make_policy(cfg, ds_meta=dataset.meta, rename_map=rename_map)
     policy.eval()
@@ -245,6 +254,24 @@ def _official_predict_chunk(
     return action_chunk.detach().cpu().numpy()[0].astype(np.float32)
 
 
+def _official_select_action(
+    *,
+    policy: Any,
+    preprocessor: Any,
+    postprocessor: Any,
+    item: dict[str, Any],
+    seed: int,
+    device: str,
+) -> np.ndarray:
+    observation = {key: value for key, value in item.items() if key.startswith("observation.") or key == "task"}
+    batch = preprocessor(observation)
+    _set_seed(seed, device)
+    with torch.inference_mode():
+        action = policy.select_action(batch)
+        action = postprocessor(action)
+    return action.detach().cpu().numpy()[0].astype(np.float32)
+
+
 def _sdk_predict_chunk(
     *,
     sdk: InferenceSDK,
@@ -268,6 +295,31 @@ def _sdk_predict_chunk(
     if gripper_mode == "normalized" and chunk.shape[-1] > 0:
         chunk[..., -1] /= 1000.0
     return chunk
+
+
+def _sdk_select_action(
+    *,
+    sdk: InferenceSDK,
+    model_type: str,
+    item: dict[str, Any],
+    required_cameras: list[str],
+    camera_map: dict[str, str],
+    gripper_mode: str,
+    seed: int,
+    device: str,
+) -> np.ndarray:
+    images = {
+        camera: _tensor_image_to_bgr_uint8(item[_resolve_image_key(item, camera_map.get(camera, camera))])
+        for camera in required_cameras
+    }
+    state = _adapt_state_for_sdk(item["observation.state"].detach().cpu().numpy(), gripper_mode)
+    instruction = None if model_type == "act" else str(item["task"])
+    _set_seed(seed, device)
+    action = sdk.predict_action(model_type, images=images, state=state, instruction=instruction)
+    action = np.asarray(action, dtype=np.float32).copy()
+    if gripper_mode == "normalized" and action.shape[-1] > 0:
+        action[-1] /= 1000.0
+    return action
 
 
 def _write_csv_header(path: Path, action_dim: int) -> None:
@@ -304,6 +356,10 @@ def main() -> int:
     args = _parse_args()
     model_dir, model_label = _resolve_model_source(args.model)
     model_type = _resolve_model_type(args.model_type, model_dir)
+    if args.temporal_ensemble and model_type != "act":
+        raise ValueError("--temporal-ensemble is only supported for ACT")
+    if args.temporal_ensemble and args.enable_rtc:
+        raise ValueError("--temporal-ensemble cannot be combined with --enable-rtc")
     dataset_root, dataset_label = _resolve_dataset_source(args.dataset)
     default_camera_map = ["camera1=image", "camera2=image2"] if model_type == "smolvla" else ["image=image", "image2=image2"]
     camera_map = _parse_camera_map(args.camera_map or default_camera_map)
@@ -335,6 +391,9 @@ def main() -> int:
             rtc_inference_delay_steps=args.rtc_inference_delay_steps,
             rtc_prefix_attention_schedule=args.rtc_prefix_attention_schedule,
             rtc_max_guidance_weight=args.rtc_max_guidance_weight,
+            enable_temporal_ensemble=args.temporal_ensemble,
+            temporal_ensemble_coeff=args.temporal_ensemble_coeff,
+            n_action_steps=1 if args.temporal_ensemble else None,
         ),
     )
     dataset_stats_path = dataset_root / "meta" / "stats.json"
@@ -352,38 +411,62 @@ def main() -> int:
     official_rtc_state = OfficialRTCState() if args.enable_rtc else None
     if args.enable_rtc and not args.preserve_policy_state:
         print("warning: --enable-rtc works best with --preserve-policy-state; resetting each frame disables RTC history.", flush=True)
+    preserve_policy_state = args.preserve_policy_state or args.temporal_ensemble
 
     try:
         for local_index in range(frame_count):
             item = dataset[local_index]
-            if not args.preserve_policy_state:
+            if not preserve_policy_state:
                 official_policy.reset()
                 sdk._get_policy(model_type).reset()
                 if official_rtc_state is not None:
                     official_rtc_state.prev_chunk_left_over = None
-            official_chunk = _official_predict_chunk(
-                policy=official_policy,
-                preprocessor=official_pre,
-                postprocessor=official_post,
-                item=item,
-                seed=args.seed,
-                device=args.device,
-                rtc_state=official_rtc_state,
-                rtc_execution_horizon=args.rtc_execution_horizon,
-                rtc_inference_delay_steps=args.rtc_inference_delay_steps,
-            )
-            sdk_chunk = _sdk_predict_chunk(
-                sdk=sdk,
-                item=item,
-                required_cameras=required_cameras,
-                camera_map=camera_map,
-                gripper_mode=args.dataset_gripper_scale,
-                seed=args.seed,
-                device=args.device,
-                model_type=model_type,
-            )
-            if sdk_chunk.ndim != 2 or official_chunk.ndim != 2 or sdk_chunk.shape[-1] != official_chunk.shape[-1]:
-                raise ValueError(f"Chunk shape mismatch: SDK {sdk_chunk.shape} vs official {official_chunk.shape}")
+
+            if args.temporal_ensemble:
+                official_action = _official_select_action(
+                    policy=official_policy,
+                    preprocessor=official_pre,
+                    postprocessor=official_post,
+                    item=item,
+                    seed=args.seed,
+                    device=args.device,
+                )
+                sdk_action = _sdk_select_action(
+                    sdk=sdk,
+                    item=item,
+                    required_cameras=required_cameras,
+                    camera_map=camera_map,
+                    gripper_mode=args.dataset_gripper_scale,
+                    seed=args.seed,
+                    device=args.device,
+                    model_type=model_type,
+                )
+                official_chunk = official_action[None, :]
+                sdk_chunk = sdk_action[None, :]
+            else:
+                official_chunk = _official_predict_chunk(
+                    policy=official_policy,
+                    preprocessor=official_pre,
+                    postprocessor=official_post,
+                    item=item,
+                    seed=args.seed,
+                    device=args.device,
+                    rtc_state=official_rtc_state,
+                    rtc_execution_horizon=args.rtc_execution_horizon,
+                    rtc_inference_delay_steps=args.rtc_inference_delay_steps,
+                )
+                sdk_chunk = _sdk_predict_chunk(
+                    sdk=sdk,
+                    item=item,
+                    required_cameras=required_cameras,
+                    camera_map=camera_map,
+                    gripper_mode=args.dataset_gripper_scale,
+                    seed=args.seed,
+                    device=args.device,
+                    model_type=model_type,
+                )
+                if sdk_chunk.ndim != 2 or official_chunk.ndim != 2 or sdk_chunk.shape[-1] != official_chunk.shape[-1]:
+                    raise ValueError(f"Chunk shape mismatch: SDK {sdk_chunk.shape} vs official {official_chunk.shape}")
 
             dataset_index = int(item["index"])
             first_action_stats.update(sdk_chunk[0], official_chunk[0])
@@ -422,7 +505,9 @@ def main() -> int:
         "rtc_execution_horizon": args.rtc_execution_horizon,
         "rtc_inference_delay_steps": args.rtc_inference_delay_steps,
         "compare_full_chunk": args.compare_full_chunk,
-        "preserve_policy_state": args.preserve_policy_state,
+        "temporal_ensemble": args.temporal_ensemble,
+        "temporal_ensemble_coeff": args.temporal_ensemble_coeff,
+        "preserve_policy_state": preserve_policy_state,
         "required_cameras": required_cameras,
         "first_action": first_action_stats.as_dict(),
         "full_chunk": chunk_stats.as_dict() if args.compare_full_chunk else None,
