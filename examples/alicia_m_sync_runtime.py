@@ -250,6 +250,32 @@ def state_dim_for_metadata(metadata: Any) -> int:
     return min(7, int(metadata.state_dim) if metadata.state_dim else 7)
 
 
+def _looks_cartesian(value: Any) -> bool:
+    text = str(value or "").lower()
+    return any(token in text for token in ("ee", "eef", "tcp", "pose", "cartesian"))
+
+
+def validate_alicia_m_robot_io(robot_io: Mapping[str, Any] | None) -> None:
+    if not robot_io:
+        return
+
+    state_type = robot_io.get("state_type")
+    action_type = robot_io.get("action_type")
+    if _looks_cartesian(state_type) or _looks_cartesian(action_type):
+        raise ValueError(
+            "This Alicia-M example only supports joint-space state/action. "
+            f"robot_io declares state_type={state_type!r}, action_type={action_type!r}."
+        )
+
+    gripper_range = robot_io.get("gripper_range")
+    if gripper_range is not None and list(gripper_range) != [0, 1000]:
+        print(
+            "warning: Alicia-M example publishes gripper targets in [0, 1000], "
+            f"but robot_io declares gripper_range={gripper_range!r}.",
+            flush=True,
+        )
+
+
 def format_array(values: np.ndarray, precision: int = 2) -> str:
     return "[" + ",".join(f"{float(value):.{precision}f}" for value in values) + "]"
 
@@ -292,14 +318,16 @@ def main() -> None:
             raise ValueError(f"Alicia-M publisher supports action_dim 6 or 7, got {metadata.action_dim}.")
         if metadata.state_dim and metadata.state_dim not in (6, 7):
             raise ValueError(f"Alicia-M state reader supports state_dim 6 or 7, got {metadata.state_dim}.")
+        validate_alicia_m_robot_io(metadata.robot_io)
 
         print(
-            "loaded model=%s action_dim=%d state_dim=%d cameras=%s"
+            "loaded model=%s action_dim=%d state_dim=%d cameras=%s robot_io=%s"
             % (
                 metadata.model_type,
                 metadata.action_dim,
                 metadata.state_dim,
                 ",".join(metadata.required_cameras),
+                "present" if metadata.robot_io else "not bundled",
             ),
             flush=True,
         )

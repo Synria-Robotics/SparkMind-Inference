@@ -302,6 +302,7 @@ class EngineMetadata:
     action_dim: int
     chunk_size: int
     n_action_steps: int
+    robot_io: dict[str, Any] | None = None
 
 
 @dataclass
@@ -667,12 +668,14 @@ def _configure_instruction(engine: Any, instruction: str | None) -> None:
 
 
 def _get_engine_metadata(engine: Any) -> EngineMetadata:
+    get_robot_io = getattr(engine, "get_robot_io", None)
     return EngineMetadata(
         required_cameras=list(engine.get_required_cameras()),
         state_dim=int(engine.state_dim),
         action_dim=int(engine.action_dim),
         chunk_size=int(engine.chunk_size),
         n_action_steps=int(engine.n_action_steps),
+        robot_io=get_robot_io() if callable(get_robot_io) else None,
     )
 
 
@@ -893,6 +896,7 @@ def _print_run_header(
     print(f"Frames: {len(dataset)}  Episodes: {dataset.num_episodes}  FPS: {dataset.fps}")
     print(f"Required cameras: {metadata.required_cameras}")
     print(f"Action dim: {metadata.action_dim}  Chunk size: {metadata.chunk_size}")
+    print(f"Robot I/O metadata: {'present' if metadata.robot_io else 'not bundled'}")
     print(f"Dataset gripper scale: {gripper_mode}")
     print(f"Device: {device}")
     print(f"Execution mode: requested={requested_execution_mode} resolved={resolved_execution_mode}")
@@ -1090,6 +1094,7 @@ def main() -> int:
         "dataset_root": str(dataset_root),
         "device": args.device,
         "control_fps": float(dataset.fps),
+        "robot_io": metadata.robot_io,
         "dataset_gripper_scale": gripper_mode,
         "camera_map": camera_map,
         "requested_execution_mode": args.execution_mode,

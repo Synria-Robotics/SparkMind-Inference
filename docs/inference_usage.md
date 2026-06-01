@@ -20,6 +20,7 @@ checkpoints/050000/
   pretrained_model/
     config.json
     model.safetensors
+    robot_io.json                 # optional, robot runtime metadata
     policy_preprocessor.json
     policy_postprocessor.json
     policy_*_processor.safetensors
@@ -33,6 +34,8 @@ checkpoints/050000/
 Inference SDK 使用 `pretrained_model/` 推理产物。可以直接传 step 父目录，SDK 会自动解析到 `pretrained_model/`；也可以直接传 `pretrained_model/`。
 
 不要把 `training_state/` 当作推理 checkpoint。它只用于继续训练，里面是 optimizer、RNG 和 step 状态。
+
+如果训练导出时保存了 `robot_io.json`，请把它放在 `pretrained_model/robot_io.json`。SDK 不会自动用它改写 observation/action，只会通过 `metadata.robot_io` 暴露给真机 runtime，用来校验相机角色、joint/eepose 语义、关节单位和夹爪范围。
 
 ## ACT
 

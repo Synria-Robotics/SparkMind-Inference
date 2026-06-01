@@ -281,6 +281,8 @@ class ACTInferenceEngine(BaseInferenceEngine):
         checkpoint_path = _resolve_act_checkpoint_dir(checkpoint_dir)
         
         try:
+            self._load_robot_io_metadata(checkpoint_path)
+
             if _is_legacy_act_checkpoint(checkpoint_path):
                 config_path = checkpoint_path / "inference_config.yaml"
                 with open(config_path, "r") as f:

@@ -7,6 +7,7 @@ Key Features (LeRobot Pattern):
 - Optional ACT temporal ensembling
 """
 
+import copy
 import logging
 import threading
 import time
@@ -522,6 +523,7 @@ class BaseInferenceEngine(ABC):
         self.requested_device: Optional[str] = None
         self.actual_device: Optional[str] = None
         self.device_warning: str = ""
+        self.robot_io: Optional[Dict[str, Any]] = None
         
         # Config
         self.smoothing_config = smoothing_config or SmoothingConfig()
@@ -537,6 +539,12 @@ class BaseInferenceEngine(ABC):
         self._episode_start_time: float = 0.0
         self._current_timestep: int = 0
         self._fallback_count: int = 0
+
+    def _load_robot_io_metadata(self, checkpoint_path: str | Path) -> None:
+        """Load optional bundled robot I/O metadata for SDK consumers."""
+        from .robot_io import load_robot_io_from_checkpoint
+
+        self.robot_io = load_robot_io_from_checkpoint(checkpoint_path)
 
     def _apply_action_chunk_overrides(self, config_dict: Dict[str, Any]) -> None:
         """Apply optional user overrides for model/action chunk scheduling."""
@@ -732,6 +740,10 @@ class BaseInferenceEngine(ABC):
             "actual_device": self.actual_device,
             "device_warning": self.device_warning,
         }
+
+    def get_robot_io(self) -> Optional[Dict[str, Any]]:
+        """Return optional bundled robot I/O metadata."""
+        return copy.deepcopy(self.robot_io) if self.robot_io is not None else None
     
     def set_control_fps(self, fps: float):
         """Update control frequency."""

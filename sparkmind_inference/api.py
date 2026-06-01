@@ -50,6 +50,7 @@ class PolicyMetadata:
     requested_device: Optional[str]
     actual_device: Optional[str]
     device_warning: str
+    robot_io: Optional[Mapping[str, Any]] = None
 
 
 class InferenceSDK:
@@ -175,7 +176,7 @@ class InferenceSDK:
         except InferenceSDKError:
             raise
         except Exception as exc:
-            raise InferenceRuntimeError(f"Failed to predict {model_type} action chunk") from exc
+            raise InferenceRuntimeError(f"Failed to predict {policy.model_type} action chunk") from exc
 
     def predict_action(
         self,
@@ -209,7 +210,7 @@ class InferenceSDK:
         except InferenceSDKError:
             raise
         except Exception as exc:
-            raise InferenceRuntimeError(f"Failed to predict {model_type} action") from exc
+            raise InferenceRuntimeError(f"Failed to predict {policy.model_type} action") from exc
 
     def get_policy_metadata(self, algorithm_type: str) -> PolicyMetadata:
         """Return metadata for a loaded policy."""
@@ -312,6 +313,7 @@ class InferenceSDK:
             requested_device=device_status.get("requested_device"),
             actual_device=device_status.get("actual_device"),
             device_warning=device_status.get("device_warning") or "",
+            robot_io=policy.get_robot_io(),
         )
 
 

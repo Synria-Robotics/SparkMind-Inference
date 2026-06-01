@@ -682,6 +682,8 @@ class PI0InferenceEngine(BaseInferenceEngine):
         self.tokenizer_source = tokenizer_source
 
         try:
+            self._load_robot_io_metadata(checkpoint_path)
+
             self._state_action_normalization = (
                 "sdk_stats" if _is_legacy_pi0_checkpoint(checkpoint_path) else "external_processor"
             )

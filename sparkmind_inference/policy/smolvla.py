@@ -427,6 +427,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         vlm_model_source = DEFAULT_SMOLVLM_MODEL
         
         try:
+            self._load_robot_io_metadata(checkpoint_path)
+
             required_image_features: list[str] = []
             if _is_legacy_smolvla_checkpoint(checkpoint_path):
                 config_path = checkpoint_path / "inference_config.yaml"

@@ -335,6 +335,7 @@ def main() -> int:
     metadata = sdk.load_policy(model_type, str(model_dir))
     action_dim = int(metadata.action_dim)
     required_cameras = list(metadata.required_cameras)
+    robot_io = dict(metadata.robot_io) if metadata.robot_io is not None else None
     _write_csv_header(csv_path, action_dim)
     stats = ActionStats(action_dim=action_dim)
 
@@ -453,6 +454,7 @@ def main() -> int:
         "rtc_execution_horizon": args.rtc_execution_horizon,
         "rtc_inference_delay_steps": args.rtc_inference_delay_steps,
         "required_cameras": required_cameras,
+        "robot_io": robot_io,
         "seed": args.seed,
         "steps": steps_taken,
         "success": success,

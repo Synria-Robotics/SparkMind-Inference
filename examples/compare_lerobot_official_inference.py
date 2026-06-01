@@ -403,6 +403,7 @@ def main() -> int:
     metadata = sdk.load_policy(model_type, str(model_dir))
     action_dim = int(metadata.action_dim)
     required_cameras = list(metadata.required_cameras)
+    robot_io = dict(metadata.robot_io) if metadata.robot_io is not None else None
     _write_csv_header(csv_path, action_dim)
 
     first_action_stats = CompareStats(action_dim=action_dim)
@@ -509,6 +510,7 @@ def main() -> int:
         "temporal_ensemble_coeff": args.temporal_ensemble_coeff,
         "preserve_policy_state": preserve_policy_state,
         "required_cameras": required_cameras,
+        "robot_io": robot_io,
         "first_action": first_action_stats.as_dict(),
         "full_chunk": chunk_stats.as_dict() if args.compare_full_chunk else None,
         "csv_path": str(csv_path),
