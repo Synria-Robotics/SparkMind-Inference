@@ -33,6 +33,21 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 try:
+    from sparkmind.utils.memory_log import log_memory as _sparkmind_log_memory
+except Exception:
+    _sparkmind_log_memory = None
+
+
+def _log_memory(stage: str) -> None:
+    if os.environ.get("PI05_LOAD_MEMORY_LOG", "").lower() not in {"1", "true", "yes"}:
+        return
+    if _sparkmind_log_memory is not None:
+        _sparkmind_log_memory(stage)
+    else:
+        logger.info("Memory[%s]", stage)
+
+
+try:
     from safetensors import safe_open as safe_open_safetensors
     from safetensors.torch import load_file as load_safetensors_file
 except ImportError:
@@ -474,6 +489,188 @@ def _format_pi05_load_error(error: Exception, requested_tokenizer: str) -> str:
     return f"模型加载失败: {message}"
 
 
+_PI_MODEL_PREFIX = "model."
+_ALLOWED_PI_STATS_PREFIXES = (
+    "normalize_inputs.",
+    "normalize_targets.",
+    "unnormalize_outputs.",
+    "model.normalize_inputs.",
+    "model.normalize_targets.",
+    "model.unnormalize_outputs.",
+)
+_ALLOWED_PI_STATS_SUFFIXES = (
+    ".mean",
+    ".std",
+    ".min",
+    ".max",
+    ".q01",
+    ".q10",
+    ".q50",
+    ".q90",
+    ".q99",
+)
+
+
+def _select_pi_remap_key(
+    key: str,
+    value_shape: torch.Size | tuple[int, ...],
+    model_shapes: Dict[str, torch.Size | tuple[int, ...]],
+) -> tuple[str, bool, list[str]]:
+    candidates = [key]
+    if ".vision_tower.vision_model." in key:
+        candidates.append(key.replace(".vision_tower.vision_model.", ".vision_tower."))
+    elif ".vision_tower." in key:
+        candidates.append(key.replace(".vision_tower.", ".vision_tower.vision_model."))
+
+    skipped_shape_mismatches: list[str] = []
+    for candidate in candidates:
+        expected_shape = model_shapes.get(candidate)
+        if expected_shape is None:
+            continue
+        if tuple(expected_shape) == tuple(value_shape):
+            return candidate, candidate != key, skipped_shape_mismatches
+        skipped_shape_mismatches.append(
+            f"{candidate}: checkpoint={tuple(value_shape)} model={tuple(expected_shape)}"
+        )
+
+    return key, False, skipped_shape_mismatches
+
+
+def _is_allowed_pi_stats_key(key: str) -> bool:
+    return key.startswith(_ALLOWED_PI_STATS_PREFIXES) and key.endswith(_ALLOWED_PI_STATS_SUFFIXES)
+
+
+def _validate_pi_streaming_load_result(
+    missing_keys: list[str],
+    unexpected_keys: list[str],
+    *,
+    family: str,
+) -> tuple[list[str], list[str]]:
+    unexpected = [key for key in unexpected_keys if not _is_allowed_pi_stats_key(key)]
+    if missing_keys or unexpected:
+        raise RuntimeError(
+            f"{family} weights did not load cleanly: "
+            f"missing={len(missing_keys)} unexpected={len(unexpected)} "
+            f"missing_sample={list(missing_keys[:8])} unexpected_sample={list(unexpected[:8])}"
+        )
+    return missing_keys, unexpected
+
+
+def _log_pi_remap_result(family: str, remap_count: int, skipped_shape_mismatches: list[str]) -> None:
+    if remap_count:
+        logger.info("Remapped %s PI checkpoint keys to local model layout for %s", remap_count, family)
+    if skipped_shape_mismatches:
+        logger.warning(
+            "Skipped %s PI checkpoint key remaps for %s due to shape mismatch, sample=%s",
+            len(skipped_shape_mismatches),
+            family,
+            skipped_shape_mismatches[:4],
+        )
+
+
+def _load_pi_core_model_weights_streaming(
+    core_model: torch.nn.Module,
+    checkpoint_path: Path,
+    *,
+    policy_cls: Any,
+    config: Any,
+    family: str,
+    device: torch.device | str | None = None,
+) -> tuple[list[str], list[str]]:
+    if safe_open_safetensors is None:
+        raise RuntimeError("缺少 safetensors 依赖，无法流式读取 model.safetensors")
+
+    safetensors_path = checkpoint_path if checkpoint_path.is_file() else checkpoint_path / "model.safetensors"
+    if not safetensors_path.is_file():
+        return load_pi_core_model_weights(
+            core_model,
+            checkpoint_path,
+            policy_cls=policy_cls,
+            config=config,
+            family=family,
+            device=device,
+        )
+
+    _log_memory(f"{family} streaming before model_state_dict")
+    model_state_dict = core_model.state_dict()
+    _log_memory(f"{family} streaming after model_state_dict")
+    model_shapes = {key: tensor.shape for key, tensor in model_state_dict.items()}
+    prefixed_model_shapes = {f"{_PI_MODEL_PREFIX}{key}": shape for key, shape in model_shapes.items()}
+    loaded_keys: set[str] = set()
+    unexpected_keys: list[str] = []
+    pre_remap_count = 0
+    remap_count = 0
+    pre_skipped: list[str] = []
+    skipped_shape_mismatches: list[str] = []
+
+    class _PolicyShim:
+        __slots__ = ("model",)
+
+        def __init__(self, model: torch.nn.Module) -> None:
+            self.model = model
+
+    shim = _PolicyShim(core_model)
+    load_device = str(device) if device is not None else "cpu"
+
+    def apply_tensor(key: str, value: torch.Tensor) -> None:
+        nonlocal remap_count
+
+        inner_key = key[len(_PI_MODEL_PREFIX):] if key.startswith(_PI_MODEL_PREFIX) else key
+        inner_key, did_remap, skipped = _select_pi_remap_key(inner_key, value.shape, model_shapes)
+        if skipped:
+            skipped_shape_mismatches.extend(skipped)
+        if did_remap:
+            remap_count += 1
+
+        target = model_state_dict.get(inner_key)
+        if target is None or tuple(target.shape) != tuple(value.shape):
+            unexpected_keys.append(inner_key)
+            return
+
+        with torch.no_grad():
+            tensor = value.to(device=target.device, dtype=target.dtype)
+            target.copy_(tensor)
+        loaded_keys.add(inner_key)
+
+    _log_memory(f"{family} streaming before safe_open")
+    loaded_count = 0
+    with safe_open_safetensors(str(safetensors_path), framework="pt", device=load_device) as handle:
+        total_count = len(handle.keys())
+        _log_memory(f"{family} streaming after safe_open ({total_count} tensors)")
+        for raw_key in handle.keys():
+            raw_shape = handle.get_slice(raw_key).get_shape()
+            fixed_raw_key, did_pre_remap, skipped = _select_pi_remap_key(
+                raw_key,
+                tuple(raw_shape),
+                prefixed_model_shapes,
+            )
+            if skipped:
+                pre_skipped.extend(skipped)
+            if did_pre_remap:
+                pre_remap_count += 1
+
+            value = handle.get_tensor(raw_key)
+            fixed_state_dict = policy_cls._fix_pytorch_state_dict_keys(
+                shim,
+                {fixed_raw_key: value},
+                config,
+            )
+            for fixed_key, fixed_value in fixed_state_dict.items():
+                apply_tensor(fixed_key, fixed_value)
+
+            del fixed_state_dict
+            del value
+            loaded_count += 1
+            if loaded_count == 1 or loaded_count % 250 == 0 or loaded_count == total_count:
+                _log_memory(f"{family} streaming loaded {loaded_count}/{total_count} tensors")
+
+    _log_pi_remap_result(f"{family} pre-fix", pre_remap_count, pre_skipped)
+    _log_pi_remap_result(family, remap_count, skipped_shape_mismatches)
+
+    missing_keys = [key for key in model_state_dict if key not in loaded_keys]
+    return _validate_pi_streaming_load_result(missing_keys, unexpected_keys, family=family)
+
+
 PI05_AVAILABLE = False
 PI05_IMPORT_ERROR: Exception | None = None
 try:
@@ -708,27 +905,44 @@ class PI05InferenceEngine(BaseInferenceEngine):
             self._image_resize = tuple(self.config.image_resolution) if self.config.image_resolution is not None else None
             self._max_state_dim = int(self.config.max_state_dim)
 
+            _log_memory("PI05 before tokenizer")
             with _normalized_hf_proxy_env():
                 self.tokenizer = AutoTokenizer.from_pretrained(
                     tokenizer_source,
                     trust_remote_code=True,
                 )
+            _log_memory("PI05 after tokenizer")
 
-            use_meta_init = self.device.type == "cuda" and materialize_pi_runtime_buffers is not None
-            init_device = torch.device("meta") if use_meta_init else self.device
-            with torch.device(init_device):
+            use_meta_init = (
+                self.device.type == "cuda"
+                and os.environ.get("PI05_DISABLE_META_INIT", "").lower() not in {"1", "true", "yes"}
+            )
+            _log_memory(f"PI05 before PI05Pytorch init meta={use_meta_init}")
+            if use_meta_init:
+                with torch.device("meta"):
+                    self.model = PI05Pytorch(
+                        self.config,
+                        rtc_processor=make_rtc_processor(self.smoothing_config),
+                    )
+                _log_memory("PI05 after PI05Pytorch meta init")
+                _log_memory(f"PI05 before model.to_empty({self.device})")
+                self.model.to_empty(device=self.device)
+                if materialize_pi_runtime_buffers is not None:
+                    materialize_pi_runtime_buffers(self.model, self.device)
+                _log_memory(f"PI05 after model.to_empty({self.device})")
+            else:
                 self.model = PI05Pytorch(
                     self.config,
                     rtc_processor=make_rtc_processor(self.smoothing_config),
                 )
-            if init_device.type == "meta":
-                self.model.to_empty(device=self.device)
-                materialize_pi_runtime_buffers(self.model, self.device)
-            else:
+                _log_memory("PI05 after PI05Pytorch init")
+                _log_memory(f"PI05 before model.to({self.device})")
                 self.model.to(self.device)
+                _log_memory(f"PI05 after model.to({self.device})")
             self.model.eval()
 
-            pi_weight_loader = load_pi_core_model_weights_streaming or load_pi_core_model_weights
+            _log_memory("PI05 before load_pi_core_model_weights")
+            pi_weight_loader = load_pi_core_model_weights_streaming or _load_pi_core_model_weights_streaming
             missing_keys, unexpected_keys = pi_weight_loader(
                 self.model,
                 checkpoint_path,
@@ -741,9 +955,11 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 # releases the temporary dict.
                 device="cpu",
             )
+            _log_memory("PI05 after load_pi_core_model_weights")
             gc.collect()
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
+            _log_memory("PI05 after gc")
 
             self.is_loaded = True
             self._init_components()
