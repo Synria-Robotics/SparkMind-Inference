@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sparkmind-inference"
-version = "1.0.0rc6"
+version = "1.0.0rc7"
 description = "Standalone inference SDK for ACT, SmolVLA, PI0, and PI0.5 policy inference."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -34,7 +34,7 @@ dependencies = [
 act = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
-  "sparkmind==1.0.0rc3",
+  "sparkmind==1.0.0rc4",
 ]
 examples = [
   "av>=14.0.0,<16.0.0",
@@ -45,7 +45,7 @@ vla = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
   "sentencepiece>=0.1.99",
-  "sparkmind[pi]==1.0.0rc3",
+  "sparkmind[pi]==1.0.0rc4",
   "tiktoken>=0.6.0",
   "transformers==5.3.0",
 ]
@@ -54,7 +54,7 @@ all = [
   "omegaconf>=2.3.0,<2.4.0",
   "safetensors>=0.5.0,<0.8.0",
   "sentencepiece>=0.1.99",
-  "sparkmind[pi,libero]==1.0.0rc3",
+  "sparkmind[pi,libero]==1.0.0rc4",
   "tiktoken>=0.6.0",
   "transformers==5.3.0",
   "lerobot[pi,smolvla,libero]==0.5.1",

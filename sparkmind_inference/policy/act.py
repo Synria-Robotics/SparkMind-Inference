@@ -7,6 +7,7 @@ Implements action queue based inference following LeRobot pattern:
 - Optional synchronous temporal ensembling
 """
 
+import gc
 import json
 import logging
 import time
@@ -344,9 +345,13 @@ class ACTInferenceEngine(BaseInferenceEngine):
             self.model.to(self.device)
             self.model.eval()
             
-            # Load weights
-            state_dict = _load_act_state_dict(checkpoint_path, self.device)
+            # Keep transient checkpoint tensors on CPU to avoid doubling GPU peak memory.
+            state_dict = _load_act_state_dict(checkpoint_path, torch.device("cpu"))
             self.model.load_state_dict(state_dict)
+            del state_dict
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
             
             logger.info(f"ACT model loaded from {checkpoint_dir}")
             logger.info(f"Required cameras: {self.required_cameras}")
@@ -477,7 +482,7 @@ class ACTInferenceEngine(BaseInferenceEngine):
         
         return action
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def _predict_chunk(self, images: Dict[str, np.ndarray], state: np.ndarray) -> np.ndarray:
         """
         Internal method to predict a chunk of actions.

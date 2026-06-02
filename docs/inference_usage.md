@@ -9,6 +9,7 @@
 - `state` 是一维 `numpy.ndarray`，维度必须等于 checkpoint 的 `observation.state`。
 - `predict_action_chunk()` 用于离线数值验证或上层自管 action queue。
 - `predict_action()` 用于普通同步控制环，内部按 LeRobot v0.5.1 FIFO 语义选择一个动作。
+- `warmup_policy()` 可用真实 observation 执行一次 chunk 推理来降低首帧延迟；warmup 后会自动 reset policy 状态。
 - 每个 episode 开始前调用 `sdk.reset_policy(model_type)`，清空 FIFO、ACT temporal ensemble 和 RTC leftover。
 
 ## SparkMind Checkpoint 目录

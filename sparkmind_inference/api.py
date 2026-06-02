@@ -82,6 +82,7 @@ class InferenceSDK:
         *,
         instruction: Optional[str] = None,
         force_reload: bool = False,
+        warmup_observation: Observation | Mapping[str, Any] | None = None,
     ) -> PolicyMetadata:
         """
         Load and cache one policy by algorithm type.
@@ -91,6 +92,8 @@ class InferenceSDK:
             checkpoint_dir: Checkpoint directory for the selected policy
             instruction: Optional language instruction for VLA policies
             force_reload: Reload even if this policy/checkpoint is already cached
+            warmup_observation: Optional real observation used to run one
+                predict_action_chunk() immediately after loading.
         """
         model_type = normalize_model_type(algorithm_type)
         checkpoint_dir = str(checkpoint_dir)
@@ -99,6 +102,8 @@ class InferenceSDK:
         if existing is not None and not force_reload:
             if self._checkpoint_dirs.get(model_type) == checkpoint_dir:
                 self._apply_instruction(existing, instruction)
+                if warmup_observation is not None:
+                    self.warmup_policy(model_type, warmup_observation)
                 return self._metadata_for(existing, checkpoint_dir)
             raise ModelLoadError(
                 f"{model_type} policy is already loaded from "
@@ -147,7 +152,44 @@ class InferenceSDK:
 
         self._policies[model_type] = policy
         self._checkpoint_dirs[model_type] = checkpoint_dir
+        if warmup_observation is not None:
+            try:
+                self.warmup_policy(model_type, warmup_observation)
+            except Exception:
+                self._policies.pop(model_type, None)
+                self._checkpoint_dirs.pop(model_type, None)
+                policy.unload()
+                raise
         return self._metadata_for(policy, checkpoint_dir)
+
+    def warmup_policy(
+        self,
+        algorithm_type: str,
+        observation: Observation | Mapping[str, Any],
+        *,
+        instruction: Optional[str] = None,
+    ) -> None:
+        """
+        Run one synchronous chunk prediction to initialize lazy inference state.
+
+        The caller must provide a real observation; the SDK does not fabricate
+        dummy images or state. Any FIFO, ACT temporal ensemble, RTC leftover, or
+        gripper smoother state created during warmup is reset before returning.
+        """
+        model_type = normalize_model_type(algorithm_type)
+        policy, normalized_images, state_array = self._prepare_policy_inputs(
+            model_type,
+            observation=observation,
+            instruction=instruction,
+        )
+        try:
+            policy.predict_chunk(normalized_images, state_array)
+        except InferenceSDKError:
+            raise
+        except Exception as exc:
+            raise InferenceRuntimeError(f"Failed to warm up {policy.model_type} policy") from exc
+        finally:
+            policy.reset()
 
     def predict_action_chunk(
         self,

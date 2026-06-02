@@ -38,7 +38,7 @@ uv pip install -e "third_party/SparkMind[pi,libero]"
 uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
-如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc6 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc3`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
+如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc7 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc4`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
 
 可选依赖：
 
@@ -55,7 +55,7 @@ uv pip install -e ".[all]" -c constraints/validated.txt
 uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
-`pyproject.toml` 使用经过验证的版本范围；`constraints/validated.txt` 固定当前验证环境的顶层依赖版本。当前验证主线是 Python 3.13、外部 LeRobot v0.5.1、SparkMind 1.0.0rc3、transformers 5.3.0。
+`pyproject.toml` 使用经过验证的版本范围；`constraints/validated.txt` 固定当前验证环境的顶层依赖版本。当前验证主线是 Python 3.13、外部 LeRobot v0.5.1、SparkMind 1.0.0rc4、transformers 5.3.0。
 
 ## Hugging Face 下载
 
@@ -87,6 +87,7 @@ hf download <dataset_repo_id> --repo-type dataset --local-dir data/lerobot/<data
 - SDK 对外按 robot-space 处理夹爪，7 维 Alicia-M 类模型的最后一维夹爪通常是 `[0, 1000]`；ALOHA ACT 这类 14 维 action/state 不会套用 7 维夹爪缩放。
 - `predict_action_chunk()` 和 `predict_action()` 都在调用线程同步执行，不启动后台推理线程。
 - `load_policy()`、observation 校验和推理错误会抛出 SDK 自定义异常，方便上位机按错误类型处理。
+- 首帧延迟敏感的真机应用可以显式调用 `warmup_policy()`，用真实 observation 初始化 lazy CUDA/tokenizer/model 状态；warmup 后 SDK 会自动 reset 内部队列状态。
 - 如果 checkpoint bundle 里包含 `robot_io.json`，`load_policy()` 返回的 `metadata.robot_io` 会暴露这份机器人接口元数据，供真机 runtime 校验 state/action 语义。
 - LeRobot dataset 里的夹爪如果是归一化 `[0, 1]`，验证脚本会通过 `--dataset-gripper-scale auto` 自动适配。
 
@@ -114,6 +115,14 @@ with InferenceSDK(device="cuda:0") as sdk:
 
     action_chunk = sdk.predict_action_chunk("pi0", observation)
     print(action_chunk.shape)  # (metadata.n_action_steps, metadata.action_dim)
+```
+
+如果真机首帧 latency 很重要，可以用第一帧真实 observation 预热一次。SDK 不会构造 fake 输入，预热后会自动清空 FIFO、RTC leftover 和 ACT temporal ensemble 状态：
+
+```python
+metadata = sdk.load_policy("pi0", "/path/to/checkpoint", instruction="Pick up the object.")
+first_observation = Observation(images=read_camera_images(), state=read_robot_state())
+sdk.warmup_policy("pi0", first_observation)
 ```
 
 真机控制可以使用同步单步 `predict_action()`。这会在调用线程内执行 LeRobot v0.5.1 风格 FIFO `engine.step()` 并直接返回当前 tick 的一个 action；ACT 可配合同步时间集成提升控制输出稳定性：

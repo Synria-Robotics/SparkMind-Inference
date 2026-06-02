@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -43,14 +44,27 @@ class DummyEngine(BaseInferenceEngine):
         self.action_dim = 7
         self.chunk_size = 50
         self.n_action_steps = 50
+        self.is_loaded = True
+        self.predict_calls = 0
+        self.reset_calls = 0
 
     def load(self, checkpoint_dir):
+        self.is_loaded = True
+        return True, ""
+
+    @staticmethod
+    def validate_checkpoint(checkpoint_dir):
         return True, ""
 
     def unload(self):
         self.is_loaded = False
 
+    def reset(self):
+        self.reset_calls += 1
+        super().reset()
+
     def _predict_chunk(self, images, state):
+        self.predict_calls += 1
         return np.zeros((self.n_action_steps, self.action_dim), dtype=np.float32)
 
 
@@ -114,6 +128,37 @@ class RobotIOMetadataTest(unittest.TestCase):
 
         with self.assertRaisesRegex(InferenceRuntimeError, "Failed to predict act action"):
             sdk.predict_action("act", images=images, state=state)
+
+    def test_warmup_policy_predicts_chunk_and_resets_state(self):
+        sdk = InferenceSDK()
+        engine = DummyEngine()
+        sdk._policies["act"] = engine
+        sdk._checkpoint_dirs["act"] = "/tmp/pretrained_model"
+        observation = {
+            "images": {"head": np.zeros((8, 8, 3), dtype=np.uint8)},
+            "state": np.zeros(8, dtype=np.float32),
+        }
+
+        sdk.warmup_policy("act", observation)
+
+        self.assertEqual(engine.predict_calls, 1)
+        self.assertEqual(engine.reset_calls, 1)
+
+    def test_load_policy_can_warmup_with_real_observation(self):
+        sdk = InferenceSDK()
+        engine = DummyEngine()
+        observation = {
+            "images": {"head": np.zeros((8, 8, 3), dtype=np.uint8)},
+            "state": np.zeros(8, dtype=np.float32),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, patch("sparkmind_inference.api.create_engine", return_value=engine):
+            metadata = sdk.load_policy("act", tmp, warmup_observation=observation)
+
+        self.assertEqual(metadata.model_type, "dummy")
+        self.assertEqual(engine.predict_calls, 1)
+        self.assertEqual(engine.reset_calls, 1)
+        self.assertIs(sdk._policies["act"], engine)
 
 
 if __name__ == "__main__":

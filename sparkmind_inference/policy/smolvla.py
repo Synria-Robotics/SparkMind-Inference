@@ -10,6 +10,7 @@ Implements action queue based inference:
 - Optional RTC for synchronous control-loop validation
 """
 
+import gc
 import json
 import logging
 import os
@@ -375,6 +376,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         self._rtc_prev_chunk_left_over: Optional[torch.Tensor] = None
         self._state_gripper_stats_unit_scaled = True
         self._action_gripper_stats_unit_scaled = True
+        self._image_mask_true: Optional[torch.Tensor] = None
+        self._padded_state_buffer: Optional[torch.Tensor] = None
 
     @staticmethod
     def validate_checkpoint(checkpoint_dir: str) -> Tuple[bool, str]:
@@ -560,9 +563,13 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
             self.model.to(self.device)
             self.model.eval()
             
-            # Load weights
-            state_dict = _load_smolvla_state_dict(checkpoint_path, self.device)
+            # Keep transient checkpoint tensors on CPU to avoid doubling GPU peak memory.
+            state_dict = _load_smolvla_state_dict(checkpoint_path, torch.device("cpu"))
             self.model.load_state_dict(state_dict)
+            del state_dict
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
             
             logger.info(f"SmolVLA model loaded from {checkpoint_dir}")
             logger.info(f"Required cameras: {self.required_cameras}")
@@ -748,7 +755,24 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         
         return action
     
-    @torch.no_grad()
+    def _valid_image_mask(self) -> torch.Tensor:
+        if self._image_mask_true is None or self._image_mask_true.device != self.device:
+            self._image_mask_true = torch.ones(1, dtype=torch.bool, device=self.device)
+        return self._image_mask_true
+
+    def _padded_state(self, processed_state: torch.Tensor) -> torch.Tensor:
+        max_state_dim = self.config.max_state_dim
+        if (
+            self._padded_state_buffer is None
+            or self._padded_state_buffer.device != self.device
+            or self._padded_state_buffer.shape != (1, max_state_dim)
+        ):
+            self._padded_state_buffer = torch.empty(1, max_state_dim, device=self.device)
+        self._padded_state_buffer.zero_()
+        self._padded_state_buffer[0, :processed_state.shape[1]] = processed_state[0]
+        return self._padded_state_buffer
+
+    @torch.inference_mode()
     def _predict_chunk(self, images: Dict[str, np.ndarray], state: np.ndarray) -> np.ndarray:
         """
         Internal method to predict a chunk of actions using Flow Matching.
@@ -772,13 +796,10 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
                      if key in processed_images]
         
         # Create image masks (all valid = True), one per camera
-        image_masks = [torch.ones(1, dtype=torch.bool, device=self.device) 
-                      for _ in image_list]
+        image_masks = [self._valid_image_mask() for _ in image_list]
         
         # Pad state to max_state_dim (32)
-        max_state_dim = self.config.max_state_dim
-        padded_state = torch.zeros(1, max_state_dim, device=self.device)
-        padded_state[0, :processed_state.shape[1]] = processed_state[0]
+        padded_state = self._padded_state(processed_state)
         
         # Sample actions using Flow Matching
         actions_chunk = self.model.sample_actions(
@@ -831,6 +852,8 @@ class SmolVLAInferenceEngine(BaseInferenceEngine):
         
         self._instruction_tokens = None
         self._instruction_attention_mask = None
+        self._image_mask_true = None
+        self._padded_state_buffer = None
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

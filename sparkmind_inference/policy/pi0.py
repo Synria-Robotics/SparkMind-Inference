@@ -490,6 +490,14 @@ try:
     from lerobot.policies.pi0.modeling_pi0 import PI0Policy
     from sparkmind.learning.VLA.models.pi0_model import PI0Pytorch
     from sparkmind.learning.VLA.utils.pi_common import load_pi_core_model_weights
+    try:
+        from sparkmind.learning.VLA.utils.pi_common import (
+            load_pi_core_model_weights_streaming,
+            materialize_pi_runtime_buffers,
+        )
+    except ImportError:
+        load_pi_core_model_weights_streaming = None
+        materialize_pi_runtime_buffers = None
 
     PI0_AVAILABLE = True
     logger.info("SparkMind PI0 model loaded successfully")
@@ -589,6 +597,10 @@ class PI0InferenceEngine(BaseInferenceEngine):
 
         self._image_resize: Optional[Tuple[int, int]] = (224, 224)
         self._rtc_prev_chunk_left_over: Optional[torch.Tensor] = None
+        self._image_mask_true: Optional[torch.Tensor] = None
+        self._image_mask_false: Optional[torch.Tensor] = None
+        self._empty_image_cache: Dict[Tuple[Tuple[int, ...], str], torch.Tensor] = {}
+        self._padded_state_buffer: Optional[torch.Tensor] = None
 
     def _configure_features_from_config(self) -> None:
         if self.config_dict is None:
@@ -720,14 +732,22 @@ class PI0InferenceEngine(BaseInferenceEngine):
                     trust_remote_code=True,
                 )
 
-            self.model = PI0Pytorch(
-                self.config,
-                rtc_processor=make_rtc_processor(self.smoothing_config),
-            )
-            self.model.to(self.device)
+            use_meta_init = self.device.type == "cuda" and materialize_pi_runtime_buffers is not None
+            init_device = torch.device("meta") if use_meta_init else self.device
+            with torch.device(init_device):
+                self.model = PI0Pytorch(
+                    self.config,
+                    rtc_processor=make_rtc_processor(self.smoothing_config),
+                )
+            if init_device.type == "meta":
+                self.model.to_empty(device=self.device)
+                materialize_pi_runtime_buffers(self.model, self.device)
+            else:
+                self.model.to(self.device)
             self.model.eval()
 
-            missing_keys, unexpected_keys = load_pi_core_model_weights(
+            pi_weight_loader = load_pi_core_model_weights_streaming or load_pi_core_model_weights
+            missing_keys, unexpected_keys = pi_weight_loader(
                 self.model,
                 checkpoint_path,
                 policy_cls=PI0Policy,
@@ -901,7 +921,40 @@ class PI0InferenceEngine(BaseInferenceEngine):
 
         return action
 
-    @torch.no_grad()
+    def _image_mask(self, valid: bool) -> torch.Tensor:
+        cache_name = "_image_mask_true" if valid else "_image_mask_false"
+        cached = getattr(self, cache_name)
+        if cached is None or cached.device != self.device:
+            cached = torch.ones(1, dtype=torch.bool, device=self.device) if valid else torch.zeros(
+                1,
+                dtype=torch.bool,
+                device=self.device,
+            )
+            setattr(self, cache_name, cached)
+        return cached
+
+    def _empty_image_like(self, template: torch.Tensor) -> torch.Tensor:
+        key = (tuple(template.shape), str(template.dtype))
+        cached = self._empty_image_cache.get(key)
+        if cached is None or cached.device != template.device:
+            cached = torch.empty_like(template)
+            cached.fill_(-1.0)
+            self._empty_image_cache[key] = cached
+        return cached
+
+    def _padded_state(self, processed_state: torch.Tensor) -> torch.Tensor:
+        max_state_dim = self.config.max_state_dim
+        if (
+            self._padded_state_buffer is None
+            or self._padded_state_buffer.device != self.device
+            or self._padded_state_buffer.shape != (1, max_state_dim)
+        ):
+            self._padded_state_buffer = torch.empty(1, max_state_dim, device=self.device)
+        self._padded_state_buffer.zero_()
+        self._padded_state_buffer[0, :processed_state.shape[1]] = processed_state[0]
+        return self._padded_state_buffer
+
+    @torch.inference_mode()
     def _predict_chunk(self, images: Dict[str, np.ndarray], state: np.ndarray) -> np.ndarray:
         """
         Internal method to predict a chunk of actions using PI0 flow matching.
@@ -929,14 +982,12 @@ class PI0InferenceEngine(BaseInferenceEngine):
         for key in image_features:
             if key in processed_images:
                 image_list.append(processed_images[key])
-                image_masks.append(torch.ones(1, dtype=torch.bool, device=self.device))
+                image_masks.append(self._image_mask(True))
             else:
-                image_list.append(torch.ones_like(empty_template) * -1.0)
-                image_masks.append(torch.zeros(1, dtype=torch.bool, device=self.device))
+                image_list.append(self._empty_image_like(empty_template))
+                image_masks.append(self._image_mask(False))
 
-        max_state_dim = self.config.max_state_dim
-        padded_state = torch.zeros(1, max_state_dim, device=self.device)
-        padded_state[0, :processed_state.shape[1]] = processed_state[0]
+        padded_state = self._padded_state(processed_state)
 
         actions_chunk = self.model.sample_actions(
             images=image_list,
@@ -985,6 +1036,10 @@ class PI0InferenceEngine(BaseInferenceEngine):
 
         self._instruction_tokens = None
         self._instruction_attention_mask = None
+        self._image_mask_true = None
+        self._image_mask_false = None
+        self._empty_image_cache.clear()
+        self._padded_state_buffer = None
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
