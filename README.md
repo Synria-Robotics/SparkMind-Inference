@@ -38,7 +38,7 @@ uv pip install -e "third_party/SparkMind[pi,libero]"
 uv pip install -e ".[all,examples]" -c constraints/validated.txt
 ```
 
-如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc5 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc3`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
+如果 SparkMind checkout 在其他位置，请先安装该路径，并设置 `INFERENCE_SDK_SPARKMIND_PATH` 指向它。SDK 1.0.0rc6 的 `pyproject.toml` 会声明 `sparkmind==1.0.0rc3`，确保用户安装到和本 SDK 一起验证过的 SparkMind；本地迁移分支仍可通过 editable install 覆盖。
 
 可选依赖：
 

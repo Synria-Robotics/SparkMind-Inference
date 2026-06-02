@@ -716,8 +716,15 @@ class PI05InferenceEngine(BaseInferenceEngine):
                 policy_cls=PI05Policy,
                 config=self.model.config,
                 family="PI05",
-                device=self.device,
+                # Keep the transient safetensors state_dict on CPU during inference loading.
+                # Loading it directly on CUDA nearly doubles GPU peak memory because the
+                # model parameters and checkpoint tensors coexist before load_state_dict()
+                # releases the temporary dict.
+                device="cpu",
             )
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
             self.is_loaded = True
             self._init_components()
